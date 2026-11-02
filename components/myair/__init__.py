@@ -1,0 +1,357 @@
+import re
+
+import esphome.codegen as cg
+import esphome.config_validation as cv
+from esphome.components import (
+    binary_sensor,
+    button,
+    climate,
+    cover,
+    number,
+    sensor,
+    switch,
+    text_sensor,
+    uart,
+)
+from esphome.const import (
+    CONF_DEVICE_ID,
+    CONF_DEVICES,
+    CONF_ESPHOME,
+    CONF_ID,
+    CONF_NAME,
+    DEVICE_CLASS_CONNECTIVITY,
+    DEVICE_CLASS_DAMPER,
+    DEVICE_CLASS_TEMPERATURE,
+    ENTITY_CATEGORY_CONFIG,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    STATE_CLASS_MEASUREMENT,
+    UNIT_CELSIUS,
+    UNIT_PERCENT,
+)
+from esphome.core import CORE
+
+DOMAIN = "myair"
+DEPENDENCIES = ["uart"]
+AUTO_LOAD = [
+    "binary_sensor",
+    "button",
+    "climate",
+    "cover",
+    "number",
+    "sensor",
+    "switch",
+    "text_sensor",
+]
+
+myair_ns = cg.esphome_ns.namespace("myair")
+MyAir = myair_ns.class_("MyAir", cg.Component, uart.UARTDevice)
+Zone = myair_ns.class_("Zone")
+SystemClimate = myair_ns.class_("SystemClimate", climate.Climate, cg.Component)
+ZoneClimate = myair_ns.class_("ZoneClimate", climate.Climate, cg.Component)
+ZoneCover = myair_ns.class_("ZoneCover", cover.Cover, cg.Component)
+ZoneSensor = myair_ns.class_("ZoneSensor", sensor.Sensor)
+SystemBinarySensor = myair_ns.class_("SystemBinarySensor", binary_sensor.BinarySensor)
+MyAirTextSensor = myair_ns.class_("MyAirTextSensor", text_sensor.TextSensor)
+ZoneNumber = myair_ns.class_("ZoneNumber", number.Number)
+ZoneSwitch = myair_ns.class_("ZoneSwitch", switch.Switch)
+ZoneButton = myair_ns.class_("ZoneButton", button.Button)
+SensorType = myair_ns.enum("SensorType", is_class=True)
+NumberType = myair_ns.enum("NumberType", is_class=True)
+TextSensorType = myair_ns.enum("TextSensorType", is_class=True)
+
+# An empty name lets a climate take its device's name.
+SYSTEM_ENTITY_NAMES = {
+    "climate": "",
+    "reference_zone": "Reference Zone",
+    "ac_mode": "AC Mode",
+    "ac_fan": "AC Fan",
+    "connected": "Connected",
+}
+ZONE_ENTITY_NAMES = {
+    "climate": "",
+    "cover": "",
+    "temperature": "Temperature",
+    "damper": "Damper",
+    "min_damper": "Minimum Damper",
+    "max_damper": "Maximum Damper",
+    "temperature_offset": "Temperature Offset",
+    "pair_sensor": "Pair Sensor",
+    "unpair_sensor": "Unpair Sensor",
+    "sensor_id": "Sensor UID",
+}
+SYSTEM_DEFAULTS = ("climate",)
+ZONE_DEFAULTS = ("climate", "temperature", "damper")
+AIRFLOW_ZONE_DEFAULTS = ("cover",)
+# Entities only a zone with a sensor can have.
+SENSOR_ENTITIES = (
+    "climate",
+    "temperature",
+    "temperature_offset",
+    "pair_sensor",
+    "unpair_sensor",
+    "sensor_id",
+)
+
+
+def entity_names(config, names, defaults, prefix="", extra=None):
+    config = config.copy()
+    for key, name in names.items():
+        if key not in config and key not in defaults:
+            continue
+        entity = config.get(key, {})
+        if entity is None:
+            entity = {}
+        if isinstance(entity, str):
+            entity = {CONF_NAME: entity}
+        if isinstance(entity, dict):
+            entity = {CONF_NAME: f"{prefix}{name}".strip(), **(extra or {}), **entity}
+        config[key] = entity
+    return config
+
+
+def system_defaults(config):
+    if not isinstance(config, dict):
+        return config
+    return entity_names(config, SYSTEM_ENTITY_NAMES, SYSTEM_DEFAULTS)
+
+
+def zone_defaults(config):
+    if not isinstance(config, dict):
+        return config
+    defaults = ZONE_DEFAULTS if config.get("sensor", True) is not False else AIRFLOW_ZONE_DEFAULTS
+    if CONF_DEVICE_ID in config:
+        return entity_names(
+            config, ZONE_ENTITY_NAMES, defaults, extra={CONF_DEVICE_ID: config[CONF_DEVICE_ID]}
+        )
+    config = config.copy()
+    config.setdefault(CONF_NAME, f"Zone {config.get('zone', '')}")
+    return entity_names(config, ZONE_ENTITY_NAMES, defaults, prefix=f"{config[CONF_NAME]} ")
+
+
+def zone_kind(config):
+    if config["sensor"]:
+        if config.get("cover"):
+            raise cv.Invalid("cover is for zones without a sensor (sensor: false)", path=["cover"])
+        return config
+    for key in ("sensor_uid", *SENSOR_ENTITIES):
+        if config.get(key):
+            raise cv.Invalid(f"{key} needs a zone with a sensor", path=[key])
+    return config
+
+
+def entity_schema(schema):
+    named = cv.maybe_simple_value(schema, key=CONF_NAME)
+
+    def validate(value):
+        return False if value is False else named(value)
+
+    return validate
+
+
+def sensor_uid(value):
+    value = cv.string_strict(value)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", value) or int(value, 16) == 0:
+        raise cv.Invalid("sensor_uid must be a nonzero six-digit hexadecimal sensor ID")
+    return value.lower()
+
+
+def diagnostic_text():
+    return entity_schema(
+        text_sensor.text_sensor_schema(MyAirTextSensor, entity_category=ENTITY_CATEGORY_DIAGNOSTIC)
+    )
+
+
+def damper_limit():
+    return entity_schema(
+        number.number_schema(
+            ZoneNumber, unit_of_measurement=UNIT_PERCENT, entity_category=ENTITY_CATEGORY_CONFIG
+        )
+    )
+
+
+ZONE_SCHEMA = cv.All(
+    zone_defaults,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(Zone),
+            cv.Required("zone"): cv.int_range(min=1, max=10),
+            cv.Optional(CONF_NAME): cv.All(cv.string_strict, cv.Length(min=1)),
+            cv.Optional(CONF_DEVICE_ID): cv.sub_device_id,
+            cv.Optional("sensor", default=True): cv.boolean,
+            cv.Optional("sensor_uid"): sensor_uid,
+            cv.Optional("airflow_weight"): cv.float_range(min=0, min_included=False, max=100),
+            cv.Optional("climate"): entity_schema(
+                climate.climate_schema(ZoneClimate).extend(cv.COMPONENT_SCHEMA)
+            ),
+            cv.Optional("cover"): entity_schema(
+                cover.cover_schema(ZoneCover, device_class=DEVICE_CLASS_DAMPER).extend(
+                    cv.COMPONENT_SCHEMA
+                )
+            ),
+            cv.Optional("temperature"): entity_schema(
+                sensor.sensor_schema(
+                    ZoneSensor,
+                    unit_of_measurement=UNIT_CELSIUS,
+                    accuracy_decimals=1,
+                    device_class=DEVICE_CLASS_TEMPERATURE,
+                    state_class=STATE_CLASS_MEASUREMENT,
+                )
+            ),
+            cv.Optional("damper"): entity_schema(
+                sensor.sensor_schema(
+                    ZoneSensor,
+                    unit_of_measurement=UNIT_PERCENT,
+                    accuracy_decimals=0,
+                    state_class=STATE_CLASS_MEASUREMENT,
+                    icon="mdi:valve",
+                )
+            ),
+            cv.Optional("min_damper"): damper_limit(),
+            cv.Optional("max_damper"): damper_limit(),
+            cv.Optional("temperature_offset"): entity_schema(
+                number.number_schema(
+                    ZoneNumber,
+                    unit_of_measurement=UNIT_CELSIUS,
+                    entity_category=ENTITY_CATEGORY_CONFIG,
+                )
+            ),
+            cv.Optional("pair_sensor"): entity_schema(
+                switch.switch_schema(
+                    ZoneSwitch,
+                    block_inverted=True,
+                    default_restore_mode="DISABLED",
+                    icon="mdi:access-point",
+                    entity_category=ENTITY_CATEGORY_CONFIG,
+                )
+            ),
+            cv.Optional("unpair_sensor"): entity_schema(
+                button.button_schema(
+                    ZoneButton, icon="mdi:link-off", entity_category=ENTITY_CATEGORY_CONFIG
+                )
+            ),
+            cv.Optional("sensor_id"): entity_schema(
+                text_sensor.text_sensor_schema(
+                    MyAirTextSensor,
+                    icon="mdi:identifier",
+                    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                )
+            ),
+        }
+    ),
+    zone_kind,
+)
+
+
+def validate_zones(config):
+    numbers = [zone["zone"] for zone in config["zones"]]
+    if len(numbers) != len(set(numbers)):
+        raise cv.Invalid("Each zone may only be configured once")
+    sensors = [zone["sensor_uid"] for zone in config["zones"] if "sensor_uid" in zone]
+    if len(sensors) != len(set(sensors)):
+        raise cv.Invalid("Each sensor may only be assigned to one zone")
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    system_defaults,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(MyAir),
+            cv.Optional("climate"): entity_schema(
+                climate.climate_schema(SystemClimate).extend(cv.COMPONENT_SCHEMA)
+            ),
+            cv.Optional("reference_zone"): diagnostic_text(),
+            cv.Optional("ac_mode"): diagnostic_text(),
+            cv.Optional("ac_fan"): diagnostic_text(),
+            cv.Optional("connected"): entity_schema(
+                binary_sensor.binary_sensor_schema(
+                    SystemBinarySensor,
+                    device_class=DEVICE_CLASS_CONNECTIVITY,
+                    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                )
+            ),
+            cv.Optional("zones", default=[]): cv.ensure_list(ZONE_SCHEMA),
+        }
+    )
+    .extend(cv.COMPONENT_SCHEMA)
+    .extend(uart.UART_DEVICE_SCHEMA),
+    validate_zones,
+)
+
+FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
+    DOMAIN,
+    baud_rate=57600,
+    require_rx=True,
+    require_tx=True,
+    data_bits=8,
+    parity="NONE",
+    stop_bits=1,
+)
+
+
+def zone_name(config):
+    if CONF_NAME in config:
+        return config[CONF_NAME]
+    for device in CORE.config[CONF_ESPHOME][CONF_DEVICES]:
+        if device[CONF_ID].id == config[CONF_DEVICE_ID].id:
+            return device[CONF_NAME]
+    return f"Zone {config['zone']}"
+
+
+async def to_code(config):
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+    await uart.register_uart_device(var, config)
+
+    if config.get("climate"):
+        entity = await climate.new_climate(config["climate"], var)
+        await cg.register_component(entity, config["climate"])
+    for key in ("reference_zone", "ac_mode", "ac_fan"):
+        if config.get(key):
+            await text_sensor.new_text_sensor(
+                config[key], var, getattr(TextSensorType, key.upper())
+            )
+    if config.get("connected"):
+        await binary_sensor.new_binary_sensor(config["connected"], var)
+
+    for zone_config in config["zones"]:
+        number_ = zone_config["zone"]
+        zone = cg.new_Pvariable(
+            zone_config[CONF_ID], var, number_, zone_name(zone_config), zone_config["sensor"]
+        )
+        if "sensor_uid" in zone_config:
+            cg.add(var.set_sensor(number_, int(zone_config["sensor_uid"], 16)))
+        if "airflow_weight" in zone_config:
+            cg.add(var.set_airflow_weight(number_, zone_config["airflow_weight"]))
+        cg.add(var.add_zone(zone))
+        if zone_config.get("climate"):
+            entity = await climate.new_climate(zone_config["climate"], zone)
+            await cg.register_component(entity, zone_config["climate"])
+        if zone_config.get("cover"):
+            entity = await cover.new_cover(zone_config["cover"], zone)
+            await cg.register_component(entity, zone_config["cover"])
+        for key in ("temperature", "damper"):
+            if zone_config.get(key):
+                await sensor.new_sensor(zone_config[key], zone, getattr(SensorType, key.upper()))
+        for key, minimum, maximum, step in (
+            ("temperature_offset", -5, 5, 0.1),
+            ("min_damper", 0, 100, 5),
+            ("max_damper", 0, 100, 5),
+        ):
+            if zone_config.get(key):
+                await number.new_number(
+                    zone_config[key],
+                    zone,
+                    getattr(NumberType, key.upper()),
+                    min_value=minimum,
+                    max_value=maximum,
+                    step=step,
+                )
+        if zone_config.get("pair_sensor"):
+            await switch.new_switch(zone_config["pair_sensor"], zone)
+        if zone_config.get("unpair_sensor"):
+            await button.new_button(zone_config["unpair_sensor"], zone)
+        if zone_config.get("sensor_id"):
+            await text_sensor.new_text_sensor(
+                zone_config["sensor_id"], zone, TextSensorType.SENSOR_ID
+            )

@@ -1,0 +1,112 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  MISE_NO_HOOKS: "1"
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
+
+jobs:
+  workflow-lint:
+    name: Workflow Lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          experimental: true
+          install_args: --locked aqua:jdx/jactionlint
+
+      - name: Lint workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: jactionlint --online --shellcheck= --format github
+
+  component:
+    name: Component
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          experimental: true
+          install_args: --locked python uv ruff cmake node oxfmt aqua:jdx/jactionlint
+
+      - name: Cache PlatformIO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-platformio-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-platformio-
+
+      - name: Install dependencies
+        run: mise run deps
+
+      - name: Check formatting
+        run: mise run fmt-check
+
+      - name: Lint component
+        run: mise run lint
+
+      - name: Run host tests
+        run: mise run test
+
+      - name: Build firmware
+        run: mise run build
+
+  status:
+    if: ${{ !cancelled() }}
+    name: Build Success
+    needs:
+      - component
+      - workflow-lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Any jobs failed?
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
+
+      - name: All jobs passed or skipped?
+        if: ${{ !(contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+        run: echo "All jobs passed or skipped" && echo "${{ toJSON(needs.*.result) }}"

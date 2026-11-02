@@ -1,0 +1,64 @@
+[tools]
+python = "3.14.10"
+uv = "0.13.6"
+ruff = "0.17.3"
+cmake = "4.4.5"
+lefthook = "2.2.2"
+oxfmt = "0.75.0"
+node = "26.13.0"
+"aqua:jdx/jactionlint" = "2.4.0"
+
+[settings]
+experimental = true
+pin = true
+lockfile = true
+
+[env]
+UV_PYTHON = "python"
+
+[tasks.deps]
+description = "Install locked Python dependencies"
+run = "uv sync --locked"
+
+[tasks.format]
+description = "Format sources and configuration"
+run = [
+  "mise fmt",
+  "oxfmt .",
+  "ruff check --fix components tests",
+  "ruff format components tests",
+  "uv run --locked clang-format -i components/myair/*.h components/myair/*.cpp tests/*.h tests/*.cpp",
+]
+
+[tasks.fmt-check]
+description = "Check formatting"
+run = [
+  "mise fmt --check",
+  "oxfmt --check .",
+  "ruff format --check components tests",
+  "uv run --locked clang-format --dry-run --Werror components/myair/*.h components/myair/*.cpp tests/*.h tests/*.cpp",
+]
+
+[tasks.lint]
+description = "Lint the component, workflows and example configuration"
+run = [
+  "ruff check components tests",
+  "jactionlint --shellcheck=",
+  "uv run --locked esphome config tests/firmware.yaml",
+]
+
+[tasks.test]
+description = "Run configuration, protocol and control tests"
+run = [
+  "cmake -S tests -B .build -DCMAKE_BUILD_TYPE=Debug",
+  "cmake --build .build",
+  "ctest --test-dir .build --output-on-failure",
+  "uv run --locked python -m unittest discover -s tests -p 'test_*.py'",
+]
+
+[tasks.build]
+description = "Compile the test firmware"
+run = "uv run --locked esphome compile tests/firmware.yaml"
+
+[hooks]
+postinstall = "lefthook install"

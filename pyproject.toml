@@ -1,0 +1,9 @@
+[project]
+name = "myair-esphome"
+version = "0.1.0"
+description = "ESPHome component that replaces the touch screen on an Advantage Air MyAir control box"
+requires-python = ">=3.14"
+dependencies = ["esphome==2026.10.1"]
+
+[dependency-groups]
+dev = ["clang-format==23.1.3"]

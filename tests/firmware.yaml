@@ -1,0 +1,59 @@
+---
+esphome:
+  name: myair
+  friendly_name: Air Conditioner
+
+esp32:
+  board: m5stack-atoms3
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  reboot_timeout: 0s
+
+wifi:
+  ssid: example-network
+  password: example-password
+  reboot_timeout: 0s
+
+external_components:
+  - source: ../components
+    components: [myair]
+
+# configuration
+uart:
+  id: cb_uart
+  tx_pin: GPIO6
+  rx_pin: GPIO5
+  baud_rate: 57600
+  rx_buffer_size: 2048
+
+myair:
+  uart_id: cb_uart
+  reference_zone: {}
+  ac_mode: {}
+  ac_fan: {}
+  connected: {}
+  zones:
+    - zone: 1
+      name: Living Room
+      sensor_uid: "01186E"
+      airflow_weight: 2
+      temperature_offset: {}
+      min_damper: {}
+      max_damper: {}
+      pair_sensor: {}
+      unpair_sensor: {}
+      sensor_id: {}
+
+    - zone: 2
+      name: Bedroom
+
+    - zone: 4
+      name: Study
+
+    - zone: 6
+      name: Garage
+      sensor: false

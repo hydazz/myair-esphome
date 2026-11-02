@@ -1,0 +1,162 @@
+# myair-esphome
+
+ESPHome component that replaces the MyAir 5 touch screen. The ESP plugs into the control box's touch screen port, the RS-485 bus the zone dampers and sensors hang off, and runs the system: mode, fan, the reference zone and every zone setpoint. Home Assistant gets one climate per room and one for the AC.
+
+The control box keeps its own jobs: the damper loop, the RF temperature sensors and the link to the AC, whose protections stay in charge.
+
+## Limitations
+
+- It is written for a CB10 control box behind a MyAir 5 touch screen. Other control boxes that speak the same protocol may work; none has been tried.
+- One master on the bus. Unplug the touch screen before the ESP goes on, and never run both.
+- It has run against a simulated control box, not yet a live one. The cable's pinout and voltage are unconfirmed: community sources put RS-485 on pins 1 and 2 and about 14 V on pin 5, and one owner disagrees. Measure first.
+- Untested on hardware: zones without sensors, constant zones, the control box's damper loop while heating (taken to mirror cooling's), and what the control box sends the AC with no temperature zone on.
+- Thresholds and holds are starting values from one house.
+- Motion sensors aren't read; presence belongs to Home Assistant.
+
+## Hardware
+
+Any ESPHome board with a hardware UART and a 3.3 V RS-485 transceiver. The YAML below is for an ATOMS3 Lite on an A131 Atomic RS485 base, which switches direction itself. The bus runs at 57600 baud, 8N1.
+
+## Configuration
+
+```yaml
+external_components:
+  - source: github://hydazz/myair-esphome@main
+    components: [myair]
+
+uart:
+  id: cb_uart
+  tx_pin: GPIO6
+  rx_pin: GPIO5
+  baud_rate: 57600
+  rx_buffer_size: 2048
+
+myair:
+  uart_id: cb_uart
+  zones:
+    - zone: 1
+      name: Living Room
+      sensor_uid: "011210"
+      airflow_weight: 2
+
+    - zone: 7
+      name: Office
+
+    - zone: 9
+      name: Garage
+      sensor: false
+```
+
+Each zone takes:
+
+- **zone** (required, 1–10): the control box's physical output. The ESP controls every listed zone and leaves an unlisted one as the control box has it.
+- **name** (optional): defaults to the zone's device name, or Zone _n_.
+- **device_id** (optional): an ESPHome sub-device for the zone; see below.
+- **sensor** (optional, default true): `false` makes an airflow zone, set to a damper position in 5 % steps, as the touch screen does. A zone with a sensor is a room with a range.
+- **sensor_uid** (optional, six hex digits, quoted): the RF sensor to assign.
+- **airflow_weight** (optional, default 1): the zone's airflow with its damper fully open, relative to the other zones'. It weighs the zone in Fan Auto, in Auto's choice of side and in whether the zone can carry the AC. Duct cross-section is a fair estimate: a zone fed by two ducts the size of the others' one is 2, and a 6" duct is about half an 8" one. Leave the installer's balancing out: the ESP reads each zone's maximum damper from the control box and scales the weight by it.
+- Entity keys, below.
+
+### A device per room
+
+A zone can be its own ESPHome sub-device, which Home Assistant shows as a device in that room's area. The zone then takes its name from the device:
+
+```yaml
+esphome:
+  name: myair
+  areas:
+    - id: living_room
+      name: Living Room
+  devices:
+    - id: living_room_zone
+      name: Living Room Zone
+      area_id: living_room
+
+myair:
+  uart_id: cb_uart
+  zones:
+    - zone: 1
+      device_id: living_room_zone
+```
+
+## Entities
+
+System, on the main device:
+
+| Key              | Entity      | Default | Shows or sets                                                 |
+| ---------------- | ----------- | ------- | ------------------------------------------------------------- |
+| `climate`        | Climate     | yes     | The AC: mode, fan, and the temperature and target it works to |
+| `reference_zone` | Text sensor | no      | The zone the AC regulates on                                  |
+| `ac_mode`        | Text sensor | no      | The AC's running mode, or Off                                 |
+| `ac_fan`         | Text sensor | no      | The AC's running fan speed, or Off                            |
+| `connected`      | Binary      | no      | The control box has answered and sent its snapshot            |
+
+Each zone:
+
+| Key                  | Entity      | Temperature zone | Airflow zone |
+| -------------------- | ----------- | ---------------- | ------------ |
+| `climate`            | Climate     | yes              | –            |
+| `cover`              | Cover       | –                | yes          |
+| `temperature`        | Sensor      | yes              | –            |
+| `damper`             | Sensor      | yes              | no           |
+| `min_damper`         | Number      | no               | no           |
+| `max_damper`         | Number      | no               | no           |
+| `temperature_offset` | Number      | no               | –            |
+| `pair_sensor`        | Switch      | no               | –            |
+| `unpair_sensor`      | Button      | no               | –            |
+| `sensor_id`          | Text sensor | no               | –            |
+
+Yes is created by default, no on request, – not at all. Set an entity to a name, a mapping of its ESPHome options, `{}` for an optional entity with its default name, or `false` to omit it. Mappings accept the usual options for the domain, such as `id`, `filters`, `icon` and `visual`. Omitting an entity doesn't change what the ESP controls: the zone keeps its saved state.
+
+- **Cover:** an airflow zone's damper. Open turns the zone on at its last position, a position sets it in 5 % steps, and closed turns it off.
+- **Damper:** the position the control box's loop sets, as a share of the zone's range: 5 % at or inside its setpoint, 30 % plus 70 % per °C past it in 5 % steps, 100 % from 1 °C past and for the reference zone. A closed zone reads 0. It is a commanded position, not measured airflow.
+- **Minimum Damper** and **Maximum Damper:** the control box's balancing limits in 5 % steps, the settings on the touch screen's technician balancing page. They are optional because they rewrite the installer's balancing.
+- **Temperature Offset:** calibrates a zone's sensor between −5 and +5 °C. The ESP subtracts it from the setpoint it sends, so the room still targets its range.
+
+## How the ESP runs the AC
+
+The AC's climate sets the mode (Off, Auto, which Home Assistant shows as Heat/Cool, Cool, Heat, Fan only, Dry), the fan (Auto, Low, Medium, High) and a target. Its temperature and target are what the AC works to: the reference zone's temperature and its room's edge, or the AC's own setpoint while no temperature zone is the reference. The AC isn't a zone, so its target is a control for the whole AC: setting it sets the edge the AC works to, heat-to while heating and cool-to otherwise, in every room, on or off, and moves a room's other edge where the two would cross. It also sets the AC's own setpoint. In Off and Fan only it does nothing.
+
+A room's climate is Off or Heat/Cool, with a heat-to and a cool-to temperature in whole degrees. Home Assistant turns rooms on and off and moves their ranges; the ESP turns that into control box settings. A room calls once it is more than 0.5 °C past the edge for the current side.
+
+- **Rooms.** An on room's zone is open and gets its cool-to (cooling, drying) or heat-to (heating) as its zone setpoint, and the control box modulates its damper against it. An off room's zone closes.
+- **Airflow zones** hold the damper position they are set to while on.
+- **Power follows the zones.** The AC runs while the mode isn't Off and a room that can carry it, or an airflow zone, is on. Turning the last one off stops it.
+- **Reference zone.** The AC regulates on one zone and backs off once that room is satisfied, and the control box holds that zone's damper at its maximum. The ESP starts it in the open room furthest past its edge, the larger airflow on a tie. Once the reference room is satisfied and another room is more than 0.3 °C past its edge, the reference moves to the room furthest past its edge, at most every 10 minutes, so the AC keeps working for the rooms that need it. It moves at once if the reference room turns off. When the AC stops, the reference stays where it was, so that zone stays open.
+- **Small rooms.** A zone with at most 15 % of the largest zone's airflow at its maximum damper, one the installer throttled down, can't carry the AC. It never takes the reference, runs the AC on its own or chooses Auto's side; it gets air while a larger room runs the AC.
+- **Trims.** The control box's damper loop is proportional, so a room with more load than its share of air settles past its edge with its damper part open. While another open room is more than 0.3 °C past its edge, the ESP sets its zone setpoint 1 °C past the edge, so its damper opens fully sooner, and takes the trim off once the room is 0.2 °C back inside. A trim changes at most every 10 minutes.
+- **Auto** cools or heats. It starts on the side the AC is running while a room calls on it or no room is 1 °C past its other edge, and otherwise on the side with more demand weighted by each room's airflow. It changes side only after no room has called on the current side for 15 minutes and a room is 1 °C past its other edge. Equal heat-to and cool-to make a single setpoint.
+- **Fan Auto** follows the airflow the open zones ask for: each room's airflow at its maximum damper, scaled by how far it is past its edge up to 2 °C, and each airflow zone's at its position. Medium starts at 20 % of the system's airflow and high at 40 %, and they hold down to 10 % and 30 %. The control box opens a damper fully at 1 °C past, and beyond that only more air helps, so a candidate for the reference also asks for medium on its own at 1.2 °C past its edge and high at 2.2 °C, holding them down to 0.8 and 1.8 °C. The fan moves one speed at a time, up at most every 10 minutes and down every 20.
+- **The fan's ceiling.** Fan Auto never runs faster than the open dampers can take: medium needs 10 % of the system's airflow open at the control box's damper positions and high 40 %, and staying on a speed needs three quarters of that. Below that the fan drops at once. A fan speed set by hand stands.
+- **The AC's own setpoint.** The ESP writes the reference room's edge as the AC's own setpoint too, for a control box wired to send the AC return air. With no temperature zone on, it writes reference 0 and the AC's own setpoint, the AC's last target, and Auto becomes the AC's own auto. The control box's installation manual has DIP switch 5 select a return-air sensor.
+- **Constant zones.** An installer's constant zones, listed in the control box, open while the other open zones' damper positions add up to less than 100 % per constant zone, as the touch screen does. List a constant zone for the ESP to manage it.
+
+## Temperature sensors
+
+The sensor UID is printed inside the case, beside the QR code. Set `sensor_uid` on the zone to assign it, quoted.
+
+To pair from Home Assistant, enable `pair_sensor`, `unpair_sensor` and `sensor_id` on the zone, then:
+
+1. Turn on the zone's **Pair Sensor** switch.
+2. Hold the button inside the probe for six seconds and release it. Its LED flashes.
+3. **Sensor UID** shows the UID once the control box receives the probe.
+
+Pairing stops on success, failure or after 60 seconds. **Unpair Sensor** removes the assignment, and pairing a probe to another zone moves it. Pairing and unpairing save the assignment on the ESP, which then takes precedence over `sensor_uid`. Assignments go to the control box on every reconnect.
+
+## What the ESP saves
+
+On change, to flash: the mode and fan, the AC's own setpoint, each room's on state and range, each airflow zone's on state and position, sensor offsets and the sensor assignments pairing makes. On first boot every zone is off and the mode is Off. Damper limits and constant zones live in the control box.
+
+## Development
+
+```sh
+mise install
+mise run deps
+mise run fmt-check
+mise run lint
+mise run test
+mise run build
+```
+
+Protocol references: [cb-daemon](https://github.com/retsimx/cb-daemon) and
+[aa_interop](https://github.com/gundy/aa_interop).

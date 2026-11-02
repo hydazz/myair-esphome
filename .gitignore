@@ -1,0 +1,11 @@
+.DS_Store
+/.mise/config.local.toml
+/.mise/mise.local.lock
+
+# Python
+/.venv/
+__pycache__/
+/.ruff_cache/
+
+# Host tests
+/.build/

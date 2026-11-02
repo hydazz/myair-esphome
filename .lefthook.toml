@@ -1,0 +1,20 @@
+[[remotes]]
+git_url = "https://github.com/hydazz/.github"
+ref = "main"
+configs = ["lefthook.common.toml"]
+
+[pre-commit.commands.format-python]
+glob = ["*.py"]
+run = "ruff check --fix {staged_files} && ruff format {staged_files}"
+stage_fixed = true
+
+[pre-commit.commands.format-cpp]
+glob = ["*.h", "*.cpp"]
+run = "uv run --locked clang-format -i {staged_files}"
+stage_fixed = true
+
+[pre-commit.commands.format-toml]
+glob = ["*.toml"]
+exclude = [".mise/**"]
+run = "oxfmt --no-error-on-unmatched-pattern {staged_files}"
+stage_fixed = true
