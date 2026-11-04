@@ -52,8 +52,8 @@ class Controller {
   bool set_ac_setpoint(float setpoint);
   float ac_setpoint() const { return ac_setpoint_; }
   // The AC's target: sets the edge the AC works rooms toward, heat-to while heating and cool-to otherwise, in every
-  // room, on or off, moving the other edge where the two would cross, and the AC's own setpoint. Refused in Off and
-  // Fan only.
+  // room, on or off, moving the other edge to keep each range its minimum width, and the AC's own setpoint. Refused in
+  // Off and Fan only.
   bool set_target(float target, uint32_t now);
   // What the AC works to: the reference room's edge, or its own setpoint while no temperature zone is the reference.
   float target() const;

@@ -12,6 +12,9 @@ static constexpr float SETPOINT_STEP = 1.0f;
 // its other edge and none has called for changeover_hold (°C).
 static constexpr float CALL = 0.5f;
 static constexpr float CHANGEOVER = 1.0f;
+// A room's range is at least this wide, so Auto's changeover points, CHANGEOVER past each edge, sit 4 °C apart and
+// Auto doesn't swing between heating and cooling (°C).
+static constexpr float MIN_RANGE = 2.0f;
 // A room is behind once it is this far past its edge: the reference can move to it, and it earns a trim (°C).
 static constexpr float BEHIND = 0.3f;
 // The most a zone's setpoint is trimmed past its room's edge, and how far back inside the edge its room must come
@@ -80,6 +83,18 @@ bool Controller::set_room(uint8_t zone, Room room) {
   if (zone == 0 || zone > 10 || !(room.heat_to >= MIN_SETPOINT) || !(room.cool_to <= MAX_SETPOINT) ||
       room.heat_to > room.cool_to)
     return false;
+  // A narrower range widens away from the edge that was set: heat-to holds unless only cool-to changed. Against a
+  // setpoint limit, the edge that was set gives way instead.
+  if (room.cool_to - room.heat_to < MIN_RANGE) {
+    const auto &old = rooms_[zone];
+    if (old && old->heat_to == room.heat_to && old->cool_to != room.cool_to) {
+      room.cool_to = std::max(room.cool_to, MIN_SETPOINT + MIN_RANGE);
+      room.heat_to = room.cool_to - MIN_RANGE;
+    } else {
+      room.heat_to = std::min(room.heat_to, MAX_SETPOINT - MIN_RANGE);
+      room.cool_to = room.heat_to + MIN_RANGE;
+    }
+  }
   rooms_[zone] = room;
   return true;
 }
@@ -117,11 +132,11 @@ bool Controller::set_target(float target, uint32_t now) {
   for (auto &room : rooms_) {
     if (!room) continue;
     if (heating) {
-      room->heat_to = target;
-      room->cool_to = std::max(room->cool_to, target);
+      room->heat_to = std::min(target, MAX_SETPOINT - MIN_RANGE);
+      room->cool_to = std::max(room->cool_to, room->heat_to + MIN_RANGE);
     } else {
-      room->cool_to = target;
-      room->heat_to = std::min(room->heat_to, target);
+      room->cool_to = std::max(target, MIN_SETPOINT + MIN_RANGE);
+      room->heat_to = std::min(room->heat_to, room->cool_to - MIN_RANGE);
     }
   }
   ac_setpoint_ = target;
@@ -234,7 +249,8 @@ bool Controller::set_damper_limit(uint8_t zone, bool maximum, float value) {
 
 // Auto starts on the side with more airflow-weighted demand, so a small cold room doesn't start the house heating
 // while large rooms want cooling. It stays on a side until no room has called on it for changeover_hold and a room
-// wants the other side. Only rooms that carry the AC count: leakage warms a closed-down toilet while the house heats.
+// wants the other side. Only rooms that carry the AC count: a throttled zone follows the AC through leakage, past its
+// other edge, whatever its own needs.
 Controller::Side Controller::choose_side_(uint32_t now) {
   if (mode_ == Mode::HEAT) return Side::HEAT;
   if (mode_ != Mode::AUTO) return Side::COOL;

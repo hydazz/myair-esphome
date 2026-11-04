@@ -357,28 +357,54 @@ static void test_target_sets_every_room() {
   controller.set_mode(Mode::COOL);
   settle(bus, controller);
   CHECK(controller.target() == 24);
-  // Cooling, every room's cool-to follows, on or off, and a heat-to above it comes down with it. Zone 3 has no room.
+  // Cooling, every room's cool-to follows, on or off, and a heat-to closer than 2 °C comes down with it. Zone 3 has no
+  // room.
   CHECK(controller.set_target(21.6f, bus.now));
   CHECK(controller.room(1)->heat_to == 20 && controller.room(1)->cool_to == 22);
-  CHECK(controller.room(2)->heat_to == 22 && controller.room(2)->cool_to == 22);
+  CHECK(controller.room(2)->heat_to == 20 && controller.room(2)->cool_to == 22);
   CHECK(!controller.room(3) && controller.ac_setpoint() == 22 && controller.target() == 22);
   settle(bus, controller);
   CHECK(bus.session.bank().find(3, 1)->data[3] == 44 && bus.session.bank().find(5)->data[3] == 44);
+  // At the bottom of the range, cool-to stops 2 °C short.
+  CHECK(controller.set_target(16, bus.now));
+  CHECK(controller.room(1)->heat_to == 16 && controller.room(1)->cool_to == 18 && controller.ac_setpoint() == 16);
   // Heating, heat-to follows and pushes cool-to up.
   controller.set_mode(Mode::HEAT);
   settle(bus, controller);
-  CHECK(controller.target() == 20);
+  CHECK(controller.target() == 16);
   CHECK(controller.set_target(23, bus.now));
-  CHECK(controller.room(1)->heat_to == 23 && controller.room(1)->cool_to == 23 && controller.target() == 23);
+  CHECK(controller.room(1)->heat_to == 23 && controller.room(1)->cool_to == 25 && controller.target() == 23);
   CHECK(!controller.set_target(15, bus.now) && !controller.set_target(33, bus.now));
   CHECK(!controller.set_target(NAN, bus.now));
   // Auto sets the side the rooms put it on.
   set_temperature(bus, 1, 17.0f);
   controller.set_mode(Mode::AUTO);
   CHECK(controller.set_target(21, bus.now));
-  CHECK(controller.room(1)->heat_to == 21 && controller.room(1)->cool_to == 23 && controller.target() == 21);
+  CHECK(controller.room(1)->heat_to == 21 && controller.room(1)->cool_to == 25 && controller.target() == 21);
   controller.set_mode(Mode::FAN);
   CHECK(!controller.set_target(22, bus.now));
+  // At the top of the range, heat-to stops 2 °C short so the range keeps its width; the AC's own setpoint takes it all.
+  controller.set_mode(Mode::HEAT);
+  CHECK(controller.set_target(32, bus.now));
+  CHECK(controller.room(1)->heat_to == 30 && controller.room(1)->cool_to == 32 && controller.ac_setpoint() == 32);
+}
+
+static void test_ranges_keep_two_degrees() {
+  Bus bus;
+  ready(bus, 1);
+  Controller controller(bus.session);
+  CHECK(controller.set_room(1, {true, 20, 24}));
+  // Heat-to set within 2 °C of cool-to pushes cool-to up; cool-to set within 2 °C pushes heat-to down.
+  CHECK(controller.set_room(1, {true, 23, 24}));
+  CHECK(controller.room(1)->heat_to == 23 && controller.room(1)->cool_to == 25);
+  CHECK(controller.set_room(1, {true, 23, 24}));
+  CHECK(controller.room(1)->heat_to == 22 && controller.room(1)->cool_to == 24);
+  // Against a limit, the edge that was set gives way.
+  CHECK(controller.set_room(1, {true, 32, 32}));
+  CHECK(controller.room(1)->heat_to == 30 && controller.room(1)->cool_to == 32);
+  CHECK(controller.set_room(1, {true, 30, 17}) == false);
+  CHECK(controller.set_room(1, {true, 16, 20}) && controller.set_room(1, {true, 16, 17}));
+  CHECK(controller.room(1)->heat_to == 16 && controller.room(1)->cool_to == 18);
 }
 
 static void test_reference_moves_once_satisfied() {
@@ -829,6 +855,7 @@ void test_controls() {
   test_last_room_off_stops_the_ac();
   test_setpoints_follow_mode_and_offset();
   test_target_sets_every_room();
+  test_ranges_keep_two_degrees();
   test_reference_moves_once_satisfied();
   test_trims_open_dampers_early();
   test_small_rooms_never_run_the_ac();
