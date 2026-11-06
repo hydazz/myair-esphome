@@ -190,7 +190,7 @@ void MyAir::loop() {
   }
   if (failures_ != session_.write_failures()) {
     failures_ = session_.write_failures();
-    ESP_LOGW(TAG, "Unconfirmed command discarded while resynchronising");
+    ESP_LOGW(TAG, "Discarded writes while resynchronising: %s", session_.discarded_writes().c_str());
   }
 }
 

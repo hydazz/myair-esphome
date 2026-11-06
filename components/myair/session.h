@@ -34,9 +34,10 @@ class Session {
   uint32_t revision() const { return revision_; }
   uint32_t generation() const { return generation_; }
   uint32_t write_failures() const { return write_failures_; }
+  const std::string &discarded_writes() const { return discarded_writes_; }
   bool queue(const Change &change);
   std::optional<Record> desired(uint8_t kind, uint8_t zone = 0) const;
-  bool writes_pending() const { return active_.has_value() || !writes_.empty(); }
+  bool writes_pending() const { return !active_.empty() || !writes_.empty(); }
 
  private:
   struct SensorBinding {
@@ -71,8 +72,10 @@ class Session {
   uint32_t revision_{};
   uint32_t generation_{};
   uint32_t write_failures_{};
+  std::string discarded_writes_;
   std::vector<Change> writes_;
-  std::optional<Change> active_;
+  std::vector<Change> active_;
+  std::vector<Record> readback_;
   uint32_t write_started_{};
   bool readback_requested_{};
   std::vector<SensorBinding> sensors_;

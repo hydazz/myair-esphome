@@ -45,8 +45,29 @@ bool RegisterBank::complete() const {
 }
 
 void Session::reset_(uint32_t now) {
-  if (writes_pending()) write_failures_++;
-  active_.reset();
+  if (writes_pending()) {
+    write_failures_++;
+    discarded_writes_.clear();
+    const auto append = [&](const Change &change, const char *reason) {
+      if (!discarded_writes_.empty()) discarded_writes_ += ", ";
+      discarded_writes_ += reason;
+      if (change.kind == kind::SYSTEM) {
+        discarded_writes_ += " AC settings";
+      } else {
+        discarded_writes_ += change.kind == kind::LIMITS ? " limits for zone " : " zone ";
+        discarded_writes_ += std::to_string(change.zone);
+      }
+      const auto *observed = bank_.find(change.kind, change.zone);
+      if (observed != nullptr) discarded_writes_ += " " + encode_record(encode_write(*observed, change));
+    };
+    for (const auto &change : active_) {
+      if (std::none_of(readback_.begin(), readback_.end(), [&](const Record &r) { return change.matches(r); }))
+        append(change, "unconfirmed");
+    }
+    for (const auto &change : writes_) append(change, "unsent");
+  }
+  active_.clear();
+  readback_.clear();
   writes_.clear();
   sensor_index_ = 0;
   sensors_requested_ = false;
@@ -73,7 +94,7 @@ void Session::tick(uint32_t now) {
   if (pairing_zone_ != 0 && now - pairing_started_ >= 60000) cancel_pairing(pairing_zone_);
   if (!started_) return;
   if (now - last_frame_ >= 5000 || now - last_response_ >= 10000 || (!ready_ && now - snapshot_started_ >= 10000) ||
-      (active_ && now - write_started_ >= 5000))
+      (!active_.empty() && now - write_started_ >= 5000))
     reset_(now);
 }
 
@@ -122,7 +143,9 @@ std::optional<Record> Session::desired(uint8_t kind, uint8_t zone) const {
   const auto *observed = bank_.find(kind, zone);
   if (observed == nullptr) return {};
   Record result = *observed;
-  if (active_ && active_->kind == kind && active_->zone == zone) result = active_->apply(result);
+  for (const auto &change : active_) {
+    if (change.kind == kind && change.zone == zone) result = change.apply(result);
+  }
   for (const auto &change : writes_) {
     if (change.kind == kind && change.zone == zone) result = change.apply(result);
   }
@@ -193,6 +216,22 @@ void Session::handle_(const Frame &message, uint32_t now) {
     if (record.kind == kind::ANNOUNCE || record.kind == kind::CONFIG) changed |= bank_.apply(record);
   }
   for (const auto &record : records) {
+    // A command can change the mode and several zone targets. Keep their readback together so consumers never
+    // combine one side's mode with the other side's targets, even when the echoes arrive in separate frames.
+    const bool readback =
+        from_control_box_(record) && std::any_of(active_.begin(), active_.end(), [&](const Change &change) {
+          return change.kind == record.kind && change.zone == zone_key(record);
+        });
+    if (readback) {
+      const auto previous = std::find_if(readback_.begin(), readback_.end(), [&](const Record &item) {
+        return item.kind == record.kind && zone_key(item) == zone_key(record);
+      });
+      if (previous == readback_.end())
+        readback_.push_back(record);
+      else
+        *previous = record;
+      continue;
+    }
     changed |= bank_.apply(record);
     // Bit 6 of a sensor record's info byte is its pair button.
     if (pairing_zone_ != 0 && record.kind == kind::SENSOR && from_control_box_(record) &&
@@ -222,10 +261,6 @@ void Session::handle_(const Frame &message, uint32_t now) {
       sensor_index_ = 0;
       sensors_requested_ = true;
     }
-    if (active_ && from_control_box_(record) && active_->matches(record)) {
-      active_.reset();
-      changed = true;
-    }
     if (record.kind == kind::FLUSH && record.unit_id != 0 && (record.direction == 0x03 || record.direction == 0x04) &&
         (record.unit_type == 0x07 || record.unit_type == 0x08)) {
       const auto reply = request(record.unit_type, record.unit_id, kind::FIRMWARE_ACK);
@@ -234,6 +269,15 @@ void Session::handle_(const Frame &message, uint32_t now) {
       });
       if (duplicate == firmware_acks_.end()) firmware_acks_.push_back(reply);
     }
+  }
+  if (!active_.empty() && std::all_of(active_.begin(), active_.end(), [&](const Change &change) {
+        return std::any_of(readback_.begin(), readback_.end(),
+                           [&](const Record &record) { return change.matches(record); });
+      })) {
+    for (const auto &record : readback_) bank_.apply(record);
+    active_.clear();
+    readback_.clear();
+    changed = true;
   }
   if (!had_control_box && bank_.has_control_box()) {
     sensor_index_ = 0;
@@ -246,7 +290,7 @@ void Session::handle_(const Frame &message, uint32_t now) {
 }
 
 bool Session::from_control_box_(const Record &record) const {
-  return record.unit_type == bank_.unit_type() && record.unit_id == bank_.unit_id() &&
+  return bank_.has_control_box() && record.unit_type == bank_.unit_type() && record.unit_id == bank_.unit_id() &&
          (record.direction == 3 || record.direction == 4);
 }
 
@@ -337,20 +381,24 @@ std::string Session::on_ping_(uint32_t now) {
     sensors_requested_ = sensor_index_ < sensors_.size();
     if (!bindings.empty()) return send_(set_can(bindings));
   }
-  if (ready_ && !active_) {
-    while (!writes_.empty()) {
+  if (ready_ && active_.empty()) {
+    std::vector<Record> records;
+    while (!writes_.empty() && records.size() < 25) {
       const auto change = writes_.front();
       writes_.erase(writes_.begin());
       const auto *observed = bank_.find(change.kind, change.zone);
       revision_++;
       if (observed == nullptr || change.matches(*observed)) continue;
-      active_ = change;
+      active_.push_back(change);
+      records.push_back(encode_write(*observed, change));
+    }
+    if (!records.empty()) {
       write_started_ = now;
       readback_requested_ = false;
-      return send_(set_can({encode_write(*observed, change)}));
+      return send_(set_can(records));
     }
   }
-  if (active_ && !readback_requested_ && now - write_started_ >= 1000) {
+  if (!active_.empty() && !readback_requested_ && now - write_started_ >= 1000) {
     readback_requested_ = true;
     return send_(set_can({request(bank_.unit_type(), 0, kind::FLUSH)}));
   }

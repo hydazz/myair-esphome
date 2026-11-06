@@ -14,13 +14,21 @@ static void report(Bus &bus, Record record) {
   bus.receive("getCAN 1 " + encode_record(record));
 }
 
-static Record next_write(Bus &bus) {
+static std::vector<Record> next_writes(Bus &bus) {
   auto payload = bus.ping();
   if (payload == "ackCAN 1") payload = bus.ping();
   CHECK(payload.substr(0, 7) == "setCAN ");
-  auto record = parse_record(payload.substr(7));
-  CHECK(record.has_value());
-  return *record;
+  std::vector<Record> records;
+  bool accepted;
+  CHECK(parse_get_can("getCAN 1 " + payload.substr(7), accepted, records));
+  CHECK(!records.empty());
+  return records;
+}
+
+static Record next_write(Bus &bus) {
+  const auto records = next_writes(bus);
+  CHECK(records.size() == 1);
+  return records.front();
 }
 
 static Record apply(Bus &bus, const Record &write) {
@@ -129,6 +137,7 @@ static void test_wrong_readback_and_timeout() {
   CHECK(!bus.session.ready());
   CHECK(!bus.session.writes_pending());
   CHECK(bus.session.write_failures() == 1);
+  CHECK(bus.session.discarded_writes() == "unconfirmed AC settings " + encode_record(write));
   ready(bus);
   CHECK(bus.ping() == "setCAN ");
   CHECK(bus.session.bank().find(5)->data[1] == 1);
@@ -226,8 +235,10 @@ static std::vector<Record> settle(Bus &bus, Controller &controller) {
     controller.step(bus.now);
     if (!bus.session.writes_pending()) return writes;
     while (bus.session.writes_pending()) {
-      writes.push_back(next_write(bus));
-      apply(bus, writes.back());
+      for (const auto &write : next_writes(bus)) {
+        writes.push_back(write);
+        apply(bus, write);
+      }
     }
   }
   CHECK(false);
@@ -343,6 +354,145 @@ static void test_setpoints_follow_mode_and_offset() {
   CHECK(controller.set_room(1, {true, 20.4f, 23.6f}));
   CHECK(controller.room(1)->heat_to == 20 && controller.room(1)->cool_to == 24);
   CHECK(!controller.set_offset(1, 6));
+}
+
+static void test_idle_changeover_stays_idle() {
+  for (const auto initial : {Mode::COOL, Mode::HEAT}) {
+    for (const bool reverse : {false, true}) {
+      Bus bus;
+      ready(bus, 3);
+      Controller controller(bus.session);
+      controller.set_mode(initial);
+      controller.set_fan(Fan::LOW);
+      for (uint8_t zone = 1; zone <= 3; zone++) {
+        CHECK(controller.set_room(zone, {true, 20, 24}));
+        set_temperature(bus, zone, 22);
+      }
+      settle(bus, controller);
+      const auto mode = initial == Mode::COOL ? Mode::HEAT : Mode::COOL;
+      controller.set_mode(mode);
+      controller.step(bus.now);
+      auto writes = next_writes(bus);
+      CHECK(writes.size() == 4);
+      CHECK(std::count_if(writes.begin(), writes.end(), [](const Record &record) {
+              return record.kind == kind::SYSTEM && record.data[field::POWER] == 1;
+            }) == 1);
+      if (reverse) std::reverse(writes.begin(), writes.end());
+      for (size_t i = 0; i <= writes.size(); i++) {
+        if (i > 0) apply(bus, writes[i - 1]);
+        controller.step(bus.now);
+        CHECK(controller.mode() == mode);
+        CHECK(controller.ac_action() == Action::IDLE);
+        CHECK(controller.ac_mode() == (i == writes.size() ? mode : initial));
+        CHECK(controller.ac_fan() == Fan::LOW);
+        for (uint8_t zone = 1; zone <= 3; zone++) {
+          CHECK(controller.action(zone) == Action::IDLE);
+          CHECK(controller.room(zone)->on);
+        }
+      }
+      CHECK(!bus.session.writes_pending());
+    }
+  }
+}
+
+static void test_off_during_changeover_does_not_restart() {
+  Bus bus;
+  ready(bus, 2);
+  Controller controller(bus.session);
+  controller.set_mode(Mode::COOL);
+  for (uint8_t zone : {1, 2}) CHECK(controller.set_room(zone, {true, 20, 24}));
+  settle(bus, controller);
+  controller.set_mode(Mode::HEAT);
+  controller.step(bus.now);
+  const auto writes = next_writes(bus);
+  CHECK(writes.size() == 3);
+  controller.set_mode(Mode::OFF);
+  for (const auto &write : writes) apply(bus, write);
+  for (const auto &write : settle(bus, controller)) {
+    CHECK(write.kind != kind::SYSTEM || write.data[field::POWER] == 0);
+  }
+  CHECK(controller.ac_mode() == Mode::OFF);
+  CHECK(controller.ac_action() == Action::OFF);
+}
+
+static void test_changeover_with_demand_becomes_active() {
+  for (const bool heating : {false, true}) {
+    Bus bus;
+    ready(bus, 1);
+    Controller controller(bus.session);
+    controller.set_mode(heating ? Mode::COOL : Mode::HEAT);
+    controller.set_room(1, {true, 20, 24});
+    set_temperature(bus, 1, heating ? 18 : 26);
+    settle(bus, controller);
+    CHECK(controller.ac_action() == Action::IDLE);
+    controller.set_mode(heating ? Mode::HEAT : Mode::COOL);
+    controller.step(bus.now);
+    const auto writes = next_writes(bus);
+    CHECK(writes.size() == 2);
+    apply(bus, writes[0]);
+    CHECK(controller.ac_action() == Action::IDLE);
+    apply(bus, writes[1]);
+    CHECK(controller.ac_action() == (heating ? Action::HEATING : Action::COOLING));
+    CHECK(controller.action(1) == controller.ac_action());
+  }
+}
+
+static void test_batch_readback_requires_all_latest_records() {
+  Bus bus;
+  ready(bus, 3);
+  Change target{kind::ZONE, 1};
+  target.set(field::SETPOINT, 40);
+  Change mode{kind::SYSTEM};
+  mode.set(field::MODE, 2);
+  bus.session.queue(target);
+  bus.session.queue(mode);
+  const auto writes = next_writes(bus);
+  CHECK(writes.size() == 2);
+  // Transport rejection retries the entire batch, byte for byte.
+  bus.receive("getCAN 0 ");
+  CHECK(bus.ping() == "ackCAN 1");
+  CHECK(bus.ping() == set_can(writes));
+  apply(bus, writes[0]);
+  CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::SETPOINT] == 48);
+  // An unrelated temperature remains live while the command is being confirmed.
+  set_temperature(bus, 3, 21);
+  CHECK(bus.session.bank().find(kind::ZONE, 3)->data[field::WHOLE_DEGREES] == 21);
+  // A later stale echo invalidates the earlier match; a transport ACK is not a readback.
+  report(bus, *bus.session.bank().find(kind::ZONE, 1));
+  apply(bus, writes[1]);
+  bus.receive("getCAN 1 ");
+  CHECK(bus.session.writes_pending());
+  CHECK(bus.session.bank().find(kind::SYSTEM)->data[field::MODE] == 1);
+  apply(bus, writes[0]);
+  CHECK(!bus.session.writes_pending());
+  CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::SETPOINT] == 40);
+  CHECK(bus.session.bank().find(kind::SYSTEM)->data[field::MODE] == 2);
+}
+
+static void test_incomplete_batch_resynchronizes() {
+  Bus bus;
+  ready(bus, 2);
+  Change target{kind::ZONE, 1};
+  target.set(field::SETPOINT, 40);
+  Change mode{kind::SYSTEM};
+  mode.set(field::MODE, 2);
+  bus.session.queue(target);
+  bus.session.queue(mode);
+  const auto writes = next_writes(bus);
+  apply(bus, writes[0]);
+  CHECK(bus.session.writes_pending());
+  bus.now += 1000;
+  CHECK(bus.ping() == "ackCAN 1");
+  CHECK(bus.ping() == "setCAN 0701000000600000000000000");
+  bus.now += 4000;
+  bus.session.tick(bus.now);
+  CHECK(!bus.session.ready());
+  CHECK(!bus.session.writes_pending());
+  CHECK(bus.session.write_failures() == 1);
+  CHECK(bus.session.discarded_writes() == "unconfirmed AC settings " + encode_record(writes[1]));
+  ready(bus, 2);
+  CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::SETPOINT] == 48);
+  CHECK(bus.session.bank().find(kind::SYSTEM)->data[field::MODE] == 1);
 }
 
 static void test_target_sets_every_room() {
@@ -843,6 +993,11 @@ static void test_actions() {
 }
 
 void test_controls() {
+  test_idle_changeover_stays_idle();
+  test_batch_readback_requires_all_latest_records();
+  test_incomplete_batch_resynchronizes();
+  test_off_during_changeover_does_not_restart();
+  test_changeover_with_demand_becomes_active();
   test_balancing_readback();
   test_write_nack_and_crc_failure();
   test_confirmed_writes();
