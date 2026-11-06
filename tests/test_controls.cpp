@@ -1111,6 +1111,26 @@ static void test_resync_reapplies_rooms() {
   CHECK(!(bus.session.bank().find(3, 2)->data[1] & 0x80));
 }
 
+static void test_three_constant_zones_fill_the_shortfall() {
+  Bus bus;
+  ready(bus, 4);
+  auto config = *bus.session.bank().find(kind::CONFIG);
+  config.data[field::CONSTANT_COUNT] = 3;
+  for (uint8_t i = 0; i < 3; i++) config.data[field::FIRST_CONSTANT + i] = i + 2;
+  report(bus, config);
+  Controller controller(bus.session);
+  controller.set_mode(Mode::COOL);
+  for (uint8_t zone = 1; zone <= 4; zone++) {
+    set_sensorless(bus, zone);
+    CHECK(controller.set_airflow(zone, {zone == 1, 5}));
+  }
+  settle(bus, controller);
+  CHECK(controller.damper(1) == 5);
+  // A 295 % shortfall needs all three constants fully open (rounded up to 5 % steps).
+  for (uint8_t zone = 2; zone <= 4; zone++) CHECK(controller.damper(zone) == 100);
+  CHECK(settle(bus, controller).empty());
+}
+
 static void test_actions() {
   Bus bus;
   ready(bus, 2);
@@ -1134,6 +1154,7 @@ static void test_actions() {
 }
 
 void test_controls() {
+  test_three_constant_zones_fill_the_shortfall();
   test_idle_changeover_stays_idle();
   test_batch_readback_requires_all_latest_records();
   test_incomplete_batch_resynchronizes();

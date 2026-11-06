@@ -395,7 +395,7 @@ bool Controller::constant_(uint8_t zone) const {
 
 // Installer constant zones hold up the system's airflow: the touch screen opens them while the other open zones' damper
 // positions add up to less than 100 % per constant zone. Returns the missing percentage.
-uint8_t Controller::shortfall_() const {
+uint16_t Controller::shortfall_() const {
   const auto *config = session_.bank().find(kind::CONFIG);
   if (config == nullptr || config->data[field::CONSTANT_COUNT] == 0) return 0;
   int open = 0;
@@ -508,7 +508,7 @@ void Controller::step(uint32_t now) {
     // and while off; room requests are applied when starting again.
     return;
   }
-  const uint8_t shortfall = shortfall_();
+  const uint16_t shortfall = shortfall_();
   const auto *config = session_.bank().find(kind::CONFIG);
   const uint8_t constants = config == nullptr ? 0 : std::clamp<uint8_t>(config->data[field::CONSTANT_COUNT], 1, 3);
 

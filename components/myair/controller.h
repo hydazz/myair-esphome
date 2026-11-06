@@ -90,7 +90,7 @@ class Controller {
   bool on_(uint8_t zone) const { return zone <= 10 && rooms_[zone] && rooms_[zone]->on; }
   bool airflow_on_(uint8_t zone) const { return zone <= 10 && airflows_[zone] && airflows_[zone]->on; }
   bool constant_(uint8_t zone) const;
-  uint8_t shortfall_() const;
+  uint16_t shortfall_() const;
   float error_(uint8_t zone, Side side) const;
   float weight_(uint8_t zone) const;
   Action zone_action_(uint8_t zone) const;
