@@ -1002,6 +1002,74 @@ static void test_airflow_zones_hold_their_position() {
   CHECK(bus.session.bank().find(5)->data[0] == 0);
 }
 
+static void test_shutdown_preserves_air_paths() {
+  for (const bool sensor_reference : {false, true}) {
+    for (const bool system_off : {false, true}) {
+      Bus bus;
+      ready(bus, 3);
+      Controller controller(bus.session);
+      controller.set_mode(Mode::COOL);
+      controller.set_fan(Fan::HIGH);
+      auto config = *bus.session.bank().find(kind::CONFIG);
+      config.data[field::CONSTANT_COUNT] = 1;
+      config.data[field::FIRST_CONSTANT] = 3;
+      report(bus, config);
+      if (sensor_reference) {
+        CHECK(controller.set_room(1, {true, 20, 24}));
+      } else {
+        set_sensorless(bus, 1);
+        CHECK(controller.set_airflow(1, {true, 20}));
+      }
+      for (uint8_t zone : {2, 3}) set_sensorless(bus, zone);
+      CHECK(controller.set_airflow(2, {true, 20}));
+      CHECK(controller.set_airflow(3, {false, 100}));
+      settle(bus, controller);
+      const auto system = *bus.session.bank().find(kind::SYSTEM);
+      CHECK(system.data[field::REFERENCE] == (sensor_reference ? 1 : 0));
+      std::array<Record, 3> zones;
+      for (uint8_t zone = 1; zone <= 3; zone++) {
+        zones[zone - 1] = *bus.session.bank().find(kind::ZONE, zone);
+        CHECK(zones[zone - 1].data[field::DAMPER] & field::OPEN);
+      }
+      if (system_off) {
+        controller.set_mode(Mode::OFF);
+      } else {
+        if (sensor_reference)
+          CHECK(controller.set_room(1, {false, 20, 24}));
+        else
+          CHECK(controller.set_airflow(1, {false, 20}));
+        CHECK(controller.set_airflow(2, {false, 20}));
+      }
+      controller.step(bus.now);
+      const auto stop = next_write(bus);
+      CHECK(stop.kind == kind::SYSTEM && stop.data[field::POWER] == 0);
+      CHECK(stop.data[field::REFERENCE] == system.data[field::REFERENCE]);
+      bus.receive("getCAN 1 ");
+      controller.step(bus.now);
+      CHECK(bus.session.writes_pending());
+      CHECK(bus.ping() == "ackCAN 1");
+      CHECK(bus.ping() == "setCAN ");
+      apply(bus, stop);
+      // A reported power-off is not fan-stop feedback. Do not close paths after it, or on an elapsed timer.
+      CHECK(settle(bus, controller).empty());
+      wait(bus, controller, 5 * 60000);
+      CHECK(settle(bus, controller).empty());
+      for (uint8_t zone = 1; zone <= 3; zone++) {
+        CHECK(bus.session.bank().find(kind::ZONE, zone)->data == zones[zone - 1].data);
+      }
+      // A later start still applies the saved zone requests and resumes regulation.
+      if (sensor_reference)
+        CHECK(controller.set_room(1, {true, 20, 24}));
+      else
+        CHECK(controller.set_airflow(1, {true, 20}));
+      controller.set_mode(Mode::COOL);
+      settle(bus, controller);
+      CHECK(controller.ac_mode() == Mode::COOL);
+      CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::DAMPER] & field::OPEN);
+    }
+  }
+}
+
 static void test_constant_zones_hold_up_airflow() {
   Bus bus;
   ready(bus, 2);
@@ -1099,6 +1167,7 @@ void test_controls() {
   test_auto_fan_is_capped_by_open_dampers();
   test_small_is_relative_to_the_largest_zone();
   test_airflow_zones_hold_their_position();
+  test_shutdown_preserves_air_paths();
   test_airflow_weights_stand_alone();
   test_constant_zones_hold_up_airflow();
   test_resync_reapplies_rooms();

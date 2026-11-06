@@ -496,7 +496,19 @@ void Controller::step(uint32_t now) {
     rooms_on |= carrying_(zone);
   }
   const bool running = mode_ != Mode::OFF && any_on;
-  const uint8_t shortfall = running ? shortfall_() : 0;
+  const uint8_t mode =
+      mode_ == Mode::AUTO ? (rooms_on ? (side == Side::COOL ? 1 : 2) : 4) : MODE_CODES[static_cast<uint8_t>(mode_)];
+  if (!running) {
+    if (system[field::POWER] != 0) {
+      Change stop{kind::SYSTEM};
+      stop.set(field::POWER, 0);
+      session_.queue(stop);
+    }
+    // Power-off readback is not fan-stop feedback. Leave the reference and damper commands alone during shutdown
+    // and while off; room requests are applied when starting again.
+    return;
+  }
+  const uint8_t shortfall = shortfall_();
   const auto *config = session_.bank().find(kind::CONFIG);
   const uint8_t constants = config == nullptr ? 0 : std::clamp<uint8_t>(config->data[field::CONSTANT_COUNT], 1, 3);
 
@@ -521,36 +533,28 @@ void Controller::step(uint32_t now) {
                    static_cast<uint8_t>(std::clamp(std::round(edge - offset(zone)), MIN_SETPOINT, MAX_SETPOINT) * 2));
       }
     } else if (zone != system[field::REFERENCE]) {
-      // The control box keeps its reference zone open, so it stays open until the reference moves.
+      // Keep the current reference open until the new reference has been confirmed.
       change.set(field::DAMPER, 0, field::OPEN);
     }
     session_.queue(change);
   }
 
+  const uint8_t reference = choose_reference_(now, side);
+  if (rooms_on && reference == 0) return;
   Change change{kind::SYSTEM};
-  if (!running) {
-    change.set(field::POWER, 0);
-  } else {
-    // With no temperature room on there is no candidate, and the reference is 0.
-    const uint8_t reference = choose_reference_(now, side);
-    if (rooms_on && reference == 0) return;
-    change.set(field::POWER, 1);
-    uint8_t mode = MODE_CODES[static_cast<uint8_t>(mode_)];
-    // Auto picks the side from the rooms; with no room to judge by, the AC's own auto does.
-    if (mode_ == Mode::AUTO) mode = reference == 0 ? 4 : side == Side::COOL ? 1 : 2;
-    change.set(field::MODE, mode);
-    change.set(field::FAN, choose_fan_(now, side));
-    if (setpoints) {
-      // The AC's setpoint follows the reference room's edge, for ACs that regulate on return air.
-      float setpoint = ac_setpoint_;
-      if (reference != 0) {
-        const auto &room = *rooms_[reference];
-        setpoint = std::round((side == Side::COOL ? room.cool_to : room.heat_to) - offset(reference));
-      }
-      change.set(field::AC_SETPOINT, static_cast<uint8_t>(std::clamp(setpoint, MIN_SETPOINT, MAX_SETPOINT) * 2));
+  change.set(field::POWER, 1);
+  change.set(field::MODE, mode);
+  change.set(field::FAN, choose_fan_(now, side));
+  if (setpoints) {
+    // The AC's setpoint follows the reference room's edge, for ACs that regulate on return air.
+    float setpoint = ac_setpoint_;
+    if (reference != 0) {
+      const auto &room = *rooms_[reference];
+      setpoint = std::round((side == Side::COOL ? room.cool_to : room.heat_to) - offset(reference));
     }
-    change.set(field::REFERENCE, reference);
+    change.set(field::AC_SETPOINT, static_cast<uint8_t>(std::clamp(setpoint, MIN_SETPOINT, MAX_SETPOINT) * 2));
   }
+  change.set(field::REFERENCE, reference);
   session_.queue(change);
 }
 
