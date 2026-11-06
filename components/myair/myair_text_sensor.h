@@ -5,7 +5,7 @@
 
 namespace esphome::myair {
 
-enum class TextSensorType { REFERENCE_ZONE, AC_MODE, AC_FAN, SENSOR_ID };
+enum class TextSensorType { REFERENCE_ZONE, AC_MODE, AC_FAN, AC_ERROR, SENSOR_ID };
 
 class MyAirTextSensor : public text_sensor::TextSensor {
  public:

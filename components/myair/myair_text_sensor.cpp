@@ -17,7 +17,26 @@ void MyAirTextSensor::refresh() {
     publish_(!uid ? "Unknown" : *uid == 0 ? "None" : text);
     return;
   }
-  if (!parent_->session().ready()) return;
+  const auto &session = parent_->session();
+  if (!session.ready()) {
+    publish_("Unknown");
+    return;
+  }
+  if (type_ == TextSensorType::AC_ERROR) {
+    const auto *record = session.bank().find(kind::AC_ERROR);
+    if (record == nullptr) {
+      publish_("Unknown");
+      return;
+    }
+    // The CB10 sends a five-character, padded error code.
+    size_t begin = 0, end = 5;
+    while (begin < end && record->data[begin] <= ' ') ++begin;
+    while (end > begin && record->data[end - 1] <= ' ') --end;
+    std::memcpy(text, record->data.data() + begin, end - begin);
+    text[end - begin] = '\0';
+    publish_(end == begin ? "None" : text);
+    return;
+  }
   const auto &controller = parent_->controller();
   static const char *const MODES[] = {"Off", "Auto", "Cool", "Heat", "Fan", "Dry"};
   static const char *const FANS[] = {"Auto", "Low", "Medium", "High"};

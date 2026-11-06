@@ -16,9 +16,11 @@ from esphome.components import (
 from esphome.const import (
     CONF_DEVICE_ID,
     CONF_DEVICES,
+    CONF_DISABLED_BY_DEFAULT,
     CONF_ESPHOME,
     CONF_ID,
     CONF_NAME,
+    DEVICE_CLASS_BATTERY,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_DAMPER,
     DEVICE_CLASS_TEMPERATURE,
@@ -28,7 +30,7 @@ from esphome.const import (
     UNIT_CELSIUS,
     UNIT_PERCENT,
 )
-from esphome.core import CORE
+from esphome.core import CORE, AutoLoad
 
 DOMAIN = "myair"
 DEPENDENCIES = ["uart"]
@@ -49,8 +51,9 @@ Zone = myair_ns.class_("Zone")
 SystemClimate = myair_ns.class_("SystemClimate", climate.Climate, cg.Component)
 ZoneClimate = myair_ns.class_("ZoneClimate", climate.Climate, cg.Component)
 ZoneCover = myair_ns.class_("ZoneCover", cover.Cover, cg.Component)
-ZoneSensor = myair_ns.class_("ZoneSensor", sensor.Sensor)
+MyAirSensor = myair_ns.class_("MyAirSensor", sensor.Sensor)
 SystemBinarySensor = myair_ns.class_("SystemBinarySensor", binary_sensor.BinarySensor)
+ZoneLowBattery = myair_ns.class_("ZoneLowBattery", binary_sensor.BinarySensor)
 MyAirTextSensor = myair_ns.class_("MyAirTextSensor", text_sensor.TextSensor)
 ZoneNumber = myair_ns.class_("ZoneNumber", number.Number)
 ZoneSwitch = myair_ns.class_("ZoneSwitch", switch.Switch)
@@ -60,13 +63,6 @@ NumberType = myair_ns.enum("NumberType", is_class=True)
 TextSensorType = myair_ns.enum("TextSensorType", is_class=True)
 
 # An empty name lets a climate take its device's name.
-SYSTEM_ENTITY_NAMES = {
-    "climate": "",
-    "reference_zone": "Reference Zone",
-    "ac_mode": "AC Mode",
-    "ac_fan": "AC Fan",
-    "connected": "Connected",
-}
 ZONE_ENTITY_NAMES = {
     "climate": "",
     "cover": "",
@@ -79,7 +75,6 @@ ZONE_ENTITY_NAMES = {
     "unpair_sensor": "Unpair Sensor",
     "sensor_id": "Sensor UID",
 }
-SYSTEM_DEFAULTS = ("climate",)
 ZONE_DEFAULTS = ("climate", "temperature", "damper")
 AIRFLOW_ZONE_DEFAULTS = ("cover",)
 # Entities only a zone with a sensor can have.
@@ -112,7 +107,7 @@ def entity_names(config, names, defaults, prefix="", extra=None):
 def system_defaults(config):
     if not isinstance(config, dict):
         return config
-    return entity_names(config, SYSTEM_ENTITY_NAMES, SYSTEM_DEFAULTS)
+    return entity_names(config, {"climate": ""}, ("climate",))
 
 
 def zone_defaults(config):
@@ -155,9 +150,52 @@ def sensor_uid(value):
     return value.lower()
 
 
-def diagnostic_text():
-    return entity_schema(
-        text_sensor.text_sensor_schema(MyAirTextSensor, entity_category=ENTITY_CATEGORY_DIAGNOSTIC)
+DIAGNOSTIC_TEXT = text_sensor.text_sensor_schema(
+    MyAirTextSensor, entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+)
+DIAGNOSTIC_DETAIL = sensor.sensor_schema(
+    MyAirSensor, accuracy_decimals=0, entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+).extend({cv.Optional(CONF_DISABLED_BY_DEFAULT, default=True): cv.boolean})
+SYSTEM_DIAGNOSTICS = {
+    "reference_zone": ("Reference Zone", DIAGNOSTIC_TEXT),
+    "ac_mode": ("AC Mode", DIAGNOSTIC_TEXT),
+    "ac_fan": ("AC Fan", DIAGNOSTIC_TEXT),
+    "ac_error": ("AC Error", DIAGNOSTIC_TEXT),
+    "connected": (
+        "Connected",
+        binary_sensor.binary_sensor_schema(
+            SystemBinarySensor,
+            device_class=DEVICE_CLASS_CONNECTIVITY,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+    ),
+    "write_failures": ("Unconfirmed Write Batches", DIAGNOSTIC_DETAIL),
+}
+PROBE_DIAGNOSTICS = {
+    "low_battery": (
+        "Low Battery",
+        binary_sensor.binary_sensor_schema(
+            ZoneLowBattery,
+            device_class=DEVICE_CLASS_BATTERY,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+    ),
+    "sensor_error": ("Sensor Error Flags", DIAGNOSTIC_DETAIL),
+    "sensor_report": ("Sensor Report Counter", DIAGNOSTIC_DETAIL),
+}
+
+
+def diagnostics(definitions, zone=None):
+    prefix = ""
+    device = {}
+    if zone is not None:
+        if CONF_DEVICE_ID in zone:
+            device[CONF_DEVICE_ID] = zone[CONF_DEVICE_ID]
+        else:
+            prefix = f"{zone[CONF_NAME]} "
+    return AutoLoad(
+        (key, schema({CONF_NAME: prefix + name, **device}))
+        for key, (name, schema) in definitions.items()
     )
 
 
@@ -190,7 +228,7 @@ ZONE_SCHEMA = cv.All(
             ),
             cv.Optional("temperature"): entity_schema(
                 sensor.sensor_schema(
-                    ZoneSensor,
+                    MyAirSensor,
                     unit_of_measurement=UNIT_CELSIUS,
                     accuracy_decimals=1,
                     device_class=DEVICE_CLASS_TEMPERATURE,
@@ -199,7 +237,7 @@ ZONE_SCHEMA = cv.All(
             ),
             cv.Optional("damper"): entity_schema(
                 sensor.sensor_schema(
-                    ZoneSensor,
+                    MyAirSensor,
                     unit_of_measurement=UNIT_PERCENT,
                     accuracy_decimals=0,
                     state_class=STATE_CLASS_MEASUREMENT,
@@ -252,6 +290,14 @@ def validate_zones(config):
     return config
 
 
+def add_diagnostics(config):
+    config["diagnostics"] = diagnostics(SYSTEM_DIAGNOSTICS)
+    for zone in config["zones"]:
+        if zone["sensor"]:
+            zone["diagnostics"] = diagnostics(PROBE_DIAGNOSTICS, zone)
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     system_defaults,
     cv.Schema(
@@ -260,22 +306,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional("climate"): entity_schema(
                 climate.climate_schema(SystemClimate).extend(cv.COMPONENT_SCHEMA)
             ),
-            cv.Optional("reference_zone"): diagnostic_text(),
-            cv.Optional("ac_mode"): diagnostic_text(),
-            cv.Optional("ac_fan"): diagnostic_text(),
-            cv.Optional("connected"): entity_schema(
-                binary_sensor.binary_sensor_schema(
-                    SystemBinarySensor,
-                    device_class=DEVICE_CLASS_CONNECTIVITY,
-                    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-                )
-            ),
             cv.Optional("zones", default=[]): cv.ensure_list(ZONE_SCHEMA),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(uart.UART_DEVICE_SCHEMA),
     validate_zones,
+    add_diagnostics,
 )
 
 FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
@@ -306,13 +343,12 @@ async def to_code(config):
     if config.get("climate"):
         entity = await climate.new_climate(config["climate"], var)
         await cg.register_component(entity, config["climate"])
-    for key in ("reference_zone", "ac_mode", "ac_fan"):
-        if config.get(key):
-            await text_sensor.new_text_sensor(
-                config[key], var, getattr(TextSensorType, key.upper())
-            )
-    if config.get("connected"):
-        await binary_sensor.new_binary_sensor(config["connected"], var)
+    for key in ("reference_zone", "ac_mode", "ac_fan", "ac_error"):
+        await text_sensor.new_text_sensor(
+            config["diagnostics"][key], var, getattr(TextSensorType, key.upper())
+        )
+    await binary_sensor.new_binary_sensor(config["diagnostics"]["connected"], var)
+    await sensor.new_sensor(config["diagnostics"]["write_failures"], var, SensorType.WRITE_FAILURES)
 
     for zone_config in config["zones"]:
         number_ = zone_config["zone"]
@@ -333,6 +369,11 @@ async def to_code(config):
         for key in ("temperature", "damper"):
             if zone_config.get(key):
                 await sensor.new_sensor(zone_config[key], zone, getattr(SensorType, key.upper()))
+        if zone_config["sensor"]:
+            probe = zone_config["diagnostics"]
+            await binary_sensor.new_binary_sensor(probe["low_battery"], zone)
+            for key in ("sensor_error", "sensor_report"):
+                await sensor.new_sensor(probe[key], zone, getattr(SensorType, key.upper()))
         for key, minimum, maximum, step in (
             ("temperature_offset", -5, 5, 0.1),
             ("min_damper", 0, 100, 5),

@@ -82,17 +82,11 @@ myair:
 
 ## Entities
 
-System, on the main device:
+The main device has a climate for mode, fan and targets. Home Assistant also gets **Reference Zone**, **AC Mode**, **AC Fan**, **AC Error** and **Connected**. The climate shows the selected mode and fan. With both set to Auto, the control box might report Cool and Low.
 
-| Key              | Entity      | Default | Shows or sets                                                 |
-| ---------------- | ----------- | ------- | ------------------------------------------------------------- |
-| `climate`        | Climate     | yes     | The AC: mode, fan, and the temperature and target it works to |
-| `reference_zone` | Text sensor | no      | The zone the AC regulates on                                  |
-| `ac_mode`        | Text sensor | no      | The AC's running mode, or Off                                 |
-| `ac_fan`         | Text sensor | no      | The AC's running fan speed, or Off                            |
-| `connected`      | Binary      | no      | The control box has answered and sent its snapshot            |
+Each temperature zone gets a **Low Battery** diagnostic. Home Assistant starts the less-used diagnostics disabled: **Sensor Error Flags** and **Sensor Report Counter** per temperature zone, and **Unconfirmed Write Batches** on the main device. Enable any of them on the device's entity page. The write counter counts resyncs that discarded pending writes during this boot. The ESP log identifies the affected writes.
 
-Each zone:
+The following zone entities accept ESPHome options in YAML:
 
 | Key                  | Entity      | Temperature zone | Airflow zone |
 | -------------------- | ----------- | ---------------- | ------------ |
@@ -139,6 +133,12 @@ Mode and room targets are sent together without cycling power. Their readback is
 - **Constant zones.** An installer's constant zones, listed in the control box, open while the other open zones' damper positions add up to less than 100 % per constant zone, as the touch screen does. List a constant zone for the ESP to manage it.
 
 ## Temperature sensors
+
+Each assigned probe has an eight-bit report counter. **Sensor Report Counter** shows its last received value in this connection. The counter can change while the temperature stays constant and wraps from 255 to 0. It is unknown until the ESP receives a report for the zone's configured or paired UID.
+
+**Sensor Error Flags** shows the control box's zone flags. The values add together. Bit values 1 and 4 indicate temperature and motion sensor clashes respectively. Value 2 is the tablet's “Check Battery” warning. The attic probe also raised it after its battery was removed. Zero means the box has set no flags.
+
+Each temperature zone shows **Low Battery** in Home Assistant. It follows the control box's “Check Battery” flag and reads unknown while the control box is disconnected.
 
 The sensor UID is printed inside the case, beside the QR code. Set `sensor_uid` on the zone to assign it, quoted.
 

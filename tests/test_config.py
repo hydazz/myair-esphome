@@ -57,16 +57,23 @@ class ConfigurationTest(unittest.TestCase):
             self.assertEqual(zone["climate"]["name"], f"Zone {n}")
             self.assertEqual(zone["temperature"]["name"], f"Zone {n} Temperature")
             self.assertEqual(zone["damper"]["name"], f"Zone {n} Damper")
+            probe = zone["diagnostics"]
+            self.assertEqual(probe["low_battery"]["name"], f"Zone {n} Low Battery")
+            self.assertFalse(probe["low_battery"]["disabled_by_default"])
+            for key in ("sensor_report", "sensor_error"):
+                self.assertTrue(probe[key]["disabled_by_default"])
             for key in ("min_damper", "max_damper", "temperature_offset", "sensor_id"):
                 self.assertNotIn(key, zone)
-        for key in ("reference_zone", "ac_mode", "ac_fan", "connected"):
-            self.assertNotIn(key, config["myair"])
+        system = config["myair"]["diagnostics"]
+        for key in ("reference_zone", "ac_mode", "ac_fan", "connected", "ac_error"):
+            self.assertFalse(system[key]["disabled_by_default"])
+        self.assertTrue(system["write_failures"]["disabled_by_default"])
         for domain, count in (
             ("climate", 11),
-            ("sensor", 20),
+            ("sensor", 41),
             ("number", 0),
-            ("text_sensor", 0),
-            ("binary_sensor", 0),
+            ("text_sensor", 4),
+            ("binary_sensor", 11),
             ("switch", 0),
             ("button", 0),
         ):
@@ -100,10 +107,13 @@ myair:
         self.assertEqual(zone["climate"]["name"], "")
         self.assertEqual(zone["temperature"]["name"], "Temperature")
         self.assertEqual(zone["sensor_id"]["name"], "Sensor UID")
+        self.assertEqual(zone["diagnostics"]["low_battery"]["device_class"], "battery")
+        for diagnostic in zone["diagnostics"].values():
+            self.assertEqual(str(diagnostic["device_id"]), "living_room_zone")
         for key in ("climate", "temperature", "damper", "sensor_id"):
             self.assertEqual(str(zone[key]["device_id"]), "living_room_zone")
         self.assertIn('1, "Living Room Zone", true);', CORE.cpp_main_section)
-        self.assertEqual(CORE.cpp_main_section.count("set_device_(living_room_zone)"), 4)
+        self.assertEqual(CORE.cpp_main_section.count("set_device_(living_room_zone)"), 7)
 
     def test_sparse_zones_keep_physical_numbers(self):
         config = self.valid(
@@ -134,9 +144,6 @@ myair:
             + """
 myair:
   climate: Ducted AC
-  reference_zone:
-    id: reference
-    icon: mdi:home-thermometer
   zones:
     - zone: 1
       name: Living Room
@@ -159,8 +166,6 @@ myair:
         hub = config["myair"]
         zone = hub["zones"][0]
         self.assertEqual(hub["climate"]["name"], "Ducted AC")
-        self.assertEqual(hub["reference_zone"]["name"], "Reference Zone")
-        self.assertEqual(str(hub["reference_zone"]["id"]), "reference")
         self.assertEqual(zone["climate"]["name"], "Living Room")
         self.assertEqual(zone["temperature"]["accuracy_decimals"], 2)
         self.assertEqual(zone["temperature"]["filters"][0]["throttle"].total_seconds, 10)
@@ -190,16 +195,9 @@ myair:
 """
         )
         generate_cpp_contents(config)
-        for domain in (
-            "climate",
-            "sensor",
-            "number",
-            "switch",
-            "binary_sensor",
-            "text_sensor",
-            "button",
-        ):
+        for domain in ("climate", "number", "switch", "button"):
             self.assertNotIn(f"App.register_{domain}(", CORE.cpp_main_section)
+        self.assertEqual(CORE.cpp_main_section.count("App.register_sensor("), 3)
         self.assertEqual(CORE.cpp_main_section.count("->add_zone("), 1)
         self.assertIn("->set_sensor(6, 71790)", CORE.cpp_main_section)
 
@@ -219,7 +217,7 @@ myair:
         zone = config["myair"]["zones"][0]
         self.assertEqual(zone["cover"]["name"], "Garage")
         self.assertEqual(zone["cover"]["device_class"], "damper")
-        for key in ("climate", "temperature", "damper", "min_damper", "max_damper"):
+        for key in ("climate", "temperature", "damper", "diagnostics", "min_damper", "max_damper"):
             self.assertNotIn(key, zone)
         self.assertIn('3, "Garage", false);', CORE.cpp_main_section)
         self.assertIn("->set_airflow_weight(3, 0.5", CORE.cpp_main_section)
@@ -231,6 +229,7 @@ myair:
             '      sensor: false\n      sensor_uid: "01186e"\n',
             "      sensor: false\n      climate: Garage\n",
             "      sensor: false\n      temperature_offset: {}\n",
+            "      sensor: false\n      low_battery: {}\n",
             "      cover: Garage\n",
         ):
             with self.subTest(zone=zone):
@@ -243,6 +242,23 @@ myair:
         self.assertEqual(config["myair"]["zones"], [])
         self.assertNotIn("->add_zone(", CORE.cpp_main_section)
         self.assertEqual(CORE.cpp_main_section.count("App.register_climate("), 1)
+
+    def test_diagnostics_are_generated_not_yaml_options(self):
+        for key in (
+            "reference_zone",
+            "ac_mode",
+            "ac_fan",
+            "ac_error",
+            "write_failures",
+            "connected",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(self.load(BASE + f"myair:\n  {key}: {{}}\n").errors)
+        for key in ("low_battery", "sensor_error", "sensor_report"):
+            with self.subTest(key=key):
+                self.assertTrue(
+                    self.load(BASE + f"myair:\n  zones:\n    - zone: 1\n      {key}: {{}}\n").errors
+                )
 
     def test_remote_source_loads_component_without_a_package(self):
         def checkout(**kwargs):
@@ -328,8 +344,8 @@ myair:
         ):
             self.assertIn(f"App.register_{domain}(", CORE.cpp_main_section)
         hub = config["myair"]
-        for key in ("reference_zone", "ac_mode", "ac_fan", "connected"):
-            self.assertEqual(hub[key]["entity_category"], "diagnostic")
+        for entity in hub["diagnostics"].values():
+            self.assertEqual(entity["entity_category"], "diagnostic")
         self.assertEqual(hub["climate"]["name"], "")
         self.assertIn("set_step(5", CORE.cpp_main_section)
         self.assertIn("->set_airflow_weight(1, 2", CORE.cpp_main_section)

@@ -32,10 +32,6 @@ uart:
 
 myair:
   uart_id: cb_uart
-  reference_zone: {}
-  ac_mode: {}
-  ac_fan: {}
-  connected: {}
   zones:
     - zone: 1
       name: Living Room
