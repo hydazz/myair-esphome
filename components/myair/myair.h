@@ -49,8 +49,10 @@ class MyAir : public Component, public uart::UARTDevice {
   bool set_room(uint8_t zone, const Room &room);
   bool set_airflow(uint8_t zone, const Airflow &airflow);
   bool set_damper_limit(uint8_t zone, bool maximum, float value);
-  // The AC's target: every room's edge on the side the AC is working, and the AC's own setpoint.
+  // Climate setters save intent; the climate calls refresh once after applying the whole request.
   bool set_target(float target);
+  bool set_targets(std::optional<float> low, std::optional<float> high);
+  bool has_temperature_zones() const;
   void pair_sensor(uint8_t zone, bool enabled);
   void unpair_sensor(uint8_t zone);
   const char *zone_name(uint8_t number) const;
@@ -66,6 +68,7 @@ class MyAir : public Component, public uart::UARTDevice {
  private:
   void publish_();
   void save_system_();
+  void save_targets_();
   Zone *zone_(uint8_t number) const;
   Session session_;
   Controller controller_;

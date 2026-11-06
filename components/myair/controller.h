@@ -51,10 +51,12 @@ class Controller {
   // The AC's own setpoint, which it regulates on while no temperature zone is on and the reference is 0.
   bool set_ac_setpoint(float setpoint);
   float ac_setpoint() const { return ac_setpoint_; }
-  // The AC's target: sets the edge the AC works rooms toward, heat-to while heating and cool-to otherwise, in every
-  // room, on or off, moving the other edge to keep each range its minimum width, and the AC's own setpoint. Refused in
-  // Off and Fan only.
-  bool set_target(float target, uint32_t now);
+  // A single target in Heat, Cool or Dry; Auto uses a range when temperature rooms are configured.
+  bool set_target(float target);
+  // Applies the supplied edges to every configured room, including rooms that are off. Room edits remain independent.
+  bool set_targets(std::optional<float> low, std::optional<float> high);
+  // The reference room, or the first configured room before a reference is selected.
+  std::optional<Room> target_room() const;
   // What the AC works to: the reference room's edge, or its own setpoint while no temperature zone is the reference.
   float target() const;
   // The zone's airflow with its damper fully open, relative to the other zones'; the control box's maximum damper

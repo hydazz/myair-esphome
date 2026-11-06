@@ -33,6 +33,8 @@ static climate::ClimateTraits base_traits() {
 climate::ClimateTraits SystemClimate::traits() {
   auto traits = base_traits();
   traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE | climate::CLIMATE_SUPPORTS_ACTION);
+  if (parent_->has_temperature_zones())
+    traits.add_feature_flags(climate::CLIMATE_SUPPORTS_TWO_POINT_TARGET_TEMPERATURE);
   traits.set_supported_modes({climate::CLIMATE_MODE_OFF, climate::CLIMATE_MODE_HEAT_COOL, climate::CLIMATE_MODE_COOL,
                               climate::CLIMATE_MODE_HEAT, climate::CLIMATE_MODE_FAN_ONLY, climate::CLIMATE_MODE_DRY});
   traits.set_supported_fan_modes(
@@ -52,8 +54,15 @@ void SystemClimate::control(const climate::ClimateCall &call) {
     }
   }
   if (auto target = call.get_target_temperature()) {
-    if (!parent_->set_target(*target)) publish_state();
+    parent_->set_target(*target);
   }
+  if (call.get_target_temperature_low() || call.get_target_temperature_high()) {
+    std::optional<float> low, high;
+    if (call.get_target_temperature_low()) low = *call.get_target_temperature_low();
+    if (call.get_target_temperature_high()) high = *call.get_target_temperature_high();
+    parent_->set_targets(low, high);
+  }
+  parent_->refresh();
 }
 
 // The AC works on the reference zone's temperature and setpoint, or on its own setpoint and return air, which the
@@ -66,14 +75,25 @@ void SystemClimate::refresh() {
   const auto next_action = ACTIONS[static_cast<uint8_t>(controller.ac_action())];
   const float current = controller.temperature(reference);
   const float target = controller.target();
+  const bool ranges = parent_->has_temperature_zones();
+  const auto room = controller.target_room();
+  const float low = room ? room->heat_to : NAN;
+  const float high = room ? room->cool_to : NAN;
+  const bool same_targets = ranges ? same(target_temperature_low, low) && same(target_temperature_high, high)
+                                   : same(target_temperature, target);
   if (mode == next_mode && fan_mode == next_fan && action == next_action && same(current_temperature, current) &&
-      same(target_temperature, target))
+      same_targets)
     return;
   mode = next_mode;
   fan_mode = next_fan;
   action = next_action;
   current_temperature = current;
-  target_temperature = target;
+  if (ranges) {
+    target_temperature_low = low;
+    target_temperature_high = high;
+  } else {
+    target_temperature = target;
+  }
   publish_state();
 }
 

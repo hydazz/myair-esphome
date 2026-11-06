@@ -77,16 +77,13 @@ float Controller::weight_(uint8_t zone) const {
   return airflow_weight(zone) * (limits != nullptr ? limits->data[field::MAX_DAMPER] : 100) / 100.0f;
 }
 
-bool Controller::set_room(uint8_t zone, Room room) {
+static bool normalize_room(Room &room, const std::optional<Room> &old) {
   room.heat_to = std::round(room.heat_to);
   room.cool_to = std::round(room.cool_to);
-  if (zone == 0 || zone > 10 || !(room.heat_to >= MIN_SETPOINT) || !(room.cool_to <= MAX_SETPOINT) ||
-      room.heat_to > room.cool_to)
-    return false;
+  if (!(room.heat_to >= MIN_SETPOINT) || !(room.cool_to <= MAX_SETPOINT) || room.heat_to > room.cool_to) return false;
   // A narrower range widens away from the edge that was set: heat-to holds unless only cool-to changed. Against a
   // setpoint limit, the edge that was set gives way instead.
   if (room.cool_to - room.heat_to < MIN_RANGE) {
-    const auto &old = rooms_[zone];
     if (old && old->heat_to == room.heat_to && old->cool_to != room.cool_to) {
       room.cool_to = std::max(room.cool_to, MIN_SETPOINT + MIN_RANGE);
       room.heat_to = room.cool_to - MIN_RANGE;
@@ -95,6 +92,11 @@ bool Controller::set_room(uint8_t zone, Room room) {
       room.cool_to = room.heat_to + MIN_RANGE;
     }
   }
+  return true;
+}
+
+bool Controller::set_room(uint8_t zone, Room room) {
+  if (zone == 0 || zone > 10 || !normalize_room(room, rooms_[zone])) return false;
   rooms_[zone] = room;
   return true;
 }
@@ -123,23 +125,56 @@ bool Controller::set_ac_setpoint(float setpoint) {
   return true;
 }
 
-bool Controller::set_target(float target, uint32_t now) {
+bool Controller::set_target(float target) {
   target = std::round(target);
-  if (!(target >= MIN_SETPOINT) || !(target <= MAX_SETPOINT) || mode_ == Mode::OFF || mode_ == Mode::FAN) return false;
-  // Auto's side comes from the rooms' temperatures.
-  if (mode_ == Mode::AUTO && !session_.ready()) return false;
-  const bool heating = choose_side_(now) == Side::HEAT;
+  if (!(target >= MIN_SETPOINT) || !(target <= MAX_SETPOINT) ||
+      (mode_ != Mode::HEAT && mode_ != Mode::COOL && mode_ != Mode::DRY && !(mode_ == Mode::AUTO && !target_room())))
+    return false;
+  if (mode_ == Mode::HEAT)
+    set_targets(target, {});
+  else
+    set_targets({}, target);
+  ac_setpoint_ = target;
+  return true;
+}
+
+std::optional<Room> Controller::target_room() const {
+  const uint8_t zone = reference();
+  if (zone <= 10 && rooms_[zone]) return rooms_[zone];
+  for (const auto &room : rooms_) {
+    if (room) return room;
+  }
+  return {};
+}
+
+bool Controller::set_targets(std::optional<float> low, std::optional<float> high) {
+  if ((!low && !high) || !target_room()) return false;
+  for (auto *value : {&low, &high}) {
+    if (!*value) continue;
+    **value = std::round(**value);
+    if (!(**value >= MIN_SETPOINT) || !(**value <= MAX_SETPOINT)) return false;
+  }
+  if (low && high) {
+    Room range{false, *low, *high};
+    if (!normalize_room(range, target_room())) return false;
+    low = range.heat_to;
+    high = range.cool_to;
+  }
   for (auto &room : rooms_) {
     if (!room) continue;
-    if (heating) {
-      room->heat_to = std::min(target, MAX_SETPOINT - MIN_RANGE);
+    if (low && high) {
+      room->heat_to = *low;
+      room->cool_to = *high;
+    } else if (low) {
+      room->heat_to = std::min(*low, MAX_SETPOINT - MIN_RANGE);
       room->cool_to = std::max(room->cool_to, room->heat_to + MIN_RANGE);
     } else {
-      room->cool_to = std::max(target, MIN_SETPOINT + MIN_RANGE);
+      room->cool_to = std::max(*high, MIN_SETPOINT + MIN_RANGE);
       room->heat_to = std::min(room->heat_to, room->cool_to - MIN_RANGE);
     }
   }
-  ac_setpoint_ = target;
+  if (mode_ == Mode::HEAT && low) ac_setpoint_ = *low;
+  if ((mode_ == Mode::COOL || mode_ == Mode::DRY) && high) ac_setpoint_ = *high;
   return true;
 }
 

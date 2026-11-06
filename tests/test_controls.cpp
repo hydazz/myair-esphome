@@ -339,14 +339,14 @@ static void test_setpoints_follow_mode_and_offset() {
   writes = settle(bus, controller);
   CHECK(writes.size() == 2);
   CHECK(writes[0].kind == 3 && writes[0].data[3] == 38);
-  CHECK(writes[1].kind == 5 && writes[1].data[1] == 2 && writes[1].data[3] == 38);
+  CHECK(writes[1].kind == 5 && writes[1].data[0] == 1 && writes[1].data[1] == 2 && writes[1].data[3] == 38);
   CHECK(controller.set_offset(1, 0.6f));
   CHECK(std::abs(controller.temperature(1) - 25.1f) < 0.001f);
   writes = settle(bus, controller);
   CHECK(writes.size() == 2 && writes[0].data[3] == 36 && writes[1].data[3] == 36);
   controller.set_mode(Mode::FAN);
   writes = settle(bus, controller);
-  CHECK(writes.size() == 1 && writes[0].kind == 5 && writes[0].data[1] == 3);
+  CHECK(writes.size() == 1 && writes[0].kind == 5 && writes[0].data[0] == 1 && writes[0].data[1] == 3);
   CHECK(!controller.set_room(1, {true, 25, 23}));
   CHECK(!controller.set_room(1, {true, 15, 23}));
   CHECK(!controller.set_room(1, {true, 20, NAN}));
@@ -503,40 +503,113 @@ static void test_target_sets_every_room() {
   CHECK(controller.set_room(1, {true, 20, 24}));
   CHECK(controller.set_room(2, {false, 23, 25}));
   // Off has no edge to set.
-  CHECK(!controller.set_target(22, bus.now));
+  CHECK(!controller.set_target(22));
   controller.set_mode(Mode::COOL);
   settle(bus, controller);
   CHECK(controller.target() == 24);
   // Cooling, every room's cool-to follows, on or off, and a heat-to closer than 2 °C comes down with it. Zone 3 has no
   // room.
-  CHECK(controller.set_target(21.6f, bus.now));
+  CHECK(controller.set_target(21.6f));
   CHECK(controller.room(1)->heat_to == 20 && controller.room(1)->cool_to == 22);
   CHECK(controller.room(2)->heat_to == 20 && controller.room(2)->cool_to == 22);
   CHECK(!controller.room(3) && controller.ac_setpoint() == 22 && controller.target() == 22);
   settle(bus, controller);
   CHECK(bus.session.bank().find(3, 1)->data[3] == 44 && bus.session.bank().find(5)->data[3] == 44);
   // At the bottom of the range, cool-to stops 2 °C short.
-  CHECK(controller.set_target(16, bus.now));
+  CHECK(controller.set_target(16));
   CHECK(controller.room(1)->heat_to == 16 && controller.room(1)->cool_to == 18 && controller.ac_setpoint() == 16);
   // Heating, heat-to follows and pushes cool-to up.
   controller.set_mode(Mode::HEAT);
   settle(bus, controller);
   CHECK(controller.target() == 16);
-  CHECK(controller.set_target(23, bus.now));
+  CHECK(controller.set_target(23));
   CHECK(controller.room(1)->heat_to == 23 && controller.room(1)->cool_to == 25 && controller.target() == 23);
-  CHECK(!controller.set_target(15, bus.now) && !controller.set_target(33, bus.now));
-  CHECK(!controller.set_target(NAN, bus.now));
-  // Auto sets the side the rooms put it on.
+  CHECK(!controller.set_target(15) && !controller.set_target(33));
+  CHECK(!controller.set_target(NAN));
+  // Auto accepts explicit edges, not a single target whose meaning depends on its side.
   set_temperature(bus, 1, 17.0f);
   controller.set_mode(Mode::AUTO);
-  CHECK(controller.set_target(21, bus.now));
-  CHECK(controller.room(1)->heat_to == 21 && controller.room(1)->cool_to == 25 && controller.target() == 21);
+  CHECK(!controller.set_target(21));
+  CHECK(controller.set_targets(21, 25));
+  CHECK(controller.target_room()->heat_to == 21 && controller.target_room()->cool_to == 25);
   controller.set_mode(Mode::FAN);
-  CHECK(!controller.set_target(22, bus.now));
+  CHECK(!controller.set_target(22));
   // At the top of the range, heat-to stops 2 °C short so the range keeps its width; the AC's own setpoint takes it all.
   controller.set_mode(Mode::HEAT);
-  CHECK(controller.set_target(32, bus.now));
+  CHECK(controller.set_target(32));
   CHECK(controller.room(1)->heat_to == 30 && controller.room(1)->cool_to == 32 && controller.ac_setpoint() == 32);
+}
+
+static void test_system_range_and_room_edits_are_independent() {
+  Bus bus;
+  Controller controller(bus.session);
+  controller.set_mode(Mode::AUTO);
+  CHECK(controller.set_room(1, {true, 20, 24}));
+  CHECK(controller.set_room(2, {false, 19, 25}));
+  CHECK(controller.set_airflow(3, {true, 50}));
+  // Targets are owned locally and can be set before the control box connects.
+  CHECK(controller.set_targets(18, 26));
+  for (uint8_t zone : {1, 2}) {
+    CHECK(controller.room(zone)->heat_to == 18 && controller.room(zone)->cool_to == 26);
+  }
+  CHECK(controller.room(1)->on && !controller.room(2)->on);
+  CHECK(controller.airflow(3)->on && controller.airflow(3)->position == 50);
+  CHECK(!controller.room(3));
+  CHECK(controller.target_room()->heat_to == 18 && controller.target_room()->cool_to == 26);
+  ready(bus, 3);
+  settle(bus, controller);
+  CHECK(controller.set_room(1, {true, 19, 27}));
+  settle(bus, controller);
+  CHECK(controller.target_room()->heat_to == 19 && controller.target_room()->cool_to == 27);
+  CHECK(controller.room(2)->heat_to == 18 && controller.room(2)->cool_to == 26);
+  // Neither mode changes nor an old bus setpoint can reapply the previous whole-house override.
+  controller.set_mode(Mode::HEAT);
+  settle(bus, controller);
+  controller.set_mode(Mode::AUTO);
+  auto stale = *bus.session.bank().find(kind::ZONE, 1);
+  stale.data[field::SETPOINT] = 36;
+  report(bus, stale);
+  settle(bus, controller);
+  CHECK(controller.room(1)->heat_to == 19 && controller.room(1)->cool_to == 27);
+  CHECK(controller.room(2)->heat_to == 18 && controller.room(2)->cool_to == 26);
+  CHECK(controller.set_targets({}, 25));
+  CHECK(controller.room(1)->heat_to == 19 && controller.room(1)->cool_to == 25);
+  CHECK(controller.room(2)->heat_to == 18 && controller.room(2)->cool_to == 25);
+  CHECK(controller.set_targets(20, {}));
+  for (uint8_t zone : {1, 2}) CHECK(controller.room(zone)->heat_to == 20 && controller.room(zone)->cool_to == 25);
+}
+
+static void test_system_range_validation_is_atomic() {
+  Bus bus;
+  Controller controller(bus.session);
+  CHECK(controller.set_room(1, {true, 20, 25}));
+  CHECK(controller.set_room(2, {false, 18, 24}));
+  CHECK(!controller.set_targets({}, {}));
+  CHECK(!controller.set_targets(NAN, 24));
+  CHECK(!controller.set_targets(20, INFINITY));
+  CHECK(!controller.set_targets(15, 24));
+  CHECK(!controller.set_targets(20, 33));
+  CHECK(!controller.set_targets(25, 20));
+  CHECK(controller.room(1)->heat_to == 20 && controller.room(1)->cool_to == 25);
+  CHECK(controller.room(2)->heat_to == 18 && controller.room(2)->cool_to == 24);
+  // Normalize the range once, so rooms with different old ranges get the same pair.
+  CHECK(controller.set_targets(20, 21));
+  for (uint8_t zone : {1, 2}) CHECK(controller.room(zone)->heat_to == 19 && controller.room(zone)->cool_to == 21);
+  CHECK(controller.set_targets(32, {}));
+  for (uint8_t zone : {1, 2}) CHECK(controller.room(zone)->heat_to == 30 && controller.room(zone)->cool_to == 32);
+  CHECK(controller.set_targets({}, 16));
+  for (uint8_t zone : {1, 2}) CHECK(controller.room(zone)->heat_to == 16 && controller.room(zone)->cool_to == 18);
+}
+
+static void test_sensorless_system_keeps_its_single_target() {
+  Bus bus;
+  Controller controller(bus.session);
+  controller.set_airflow(1, {true, 50});
+  controller.set_mode(Mode::AUTO);
+  CHECK(!controller.target_room());
+  CHECK(!controller.set_targets(20, 24));
+  CHECK(controller.set_target(22));
+  CHECK(controller.target() == 22);
 }
 
 static void test_ranges_keep_two_degrees() {
@@ -701,7 +774,7 @@ static void test_auto_changeover() {
   const auto writes = settle(bus, controller);
   CHECK(writes.size() == 3);
   CHECK(writes[0].kind == 3 && writes[0].data[3] == 42 && writes[1].kind == 3 && writes[1].data[3] == 42);
-  CHECK(writes[2].kind == 5 && writes[2].data[1] == 2 && writes[2].data[4] == 2);
+  CHECK(writes[2].kind == 5 && writes[2].data[0] == 1 && writes[2].data[1] == 2 && writes[2].data[4] == 2);
 }
 
 static void test_auto_weighs_rooms_by_airflow() {
@@ -1011,6 +1084,9 @@ void test_controls() {
   test_setpoints_follow_mode_and_offset();
   test_target_sets_every_room();
   test_ranges_keep_two_degrees();
+  test_system_range_and_room_edits_are_independent();
+  test_system_range_validation_is_atomic();
+  test_sensorless_system_keeps_its_single_target();
   test_reference_moves_once_satisfied();
   test_trims_open_dampers_early();
   test_small_rooms_never_run_the_ac();

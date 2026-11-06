@@ -78,13 +78,11 @@ void MyAir::setup() {
 void MyAir::set_mode(Mode mode) {
   controller_.set_mode(mode);
   save_system_();
-  refresh();
 }
 
 void MyAir::set_fan(Fan fan) {
   controller_.set_fan(fan);
   save_system_();
-  refresh();
 }
 
 void MyAir::save_system_() {
@@ -129,18 +127,36 @@ bool MyAir::set_damper_limit(uint8_t zone, bool maximum, float value) {
 }
 
 bool MyAir::set_target(float target) {
-  const bool accepted = controller_.set_target(target, millis());
-  if (accepted) {
-    for (auto *zone : zones_) {
-      if (zone->sensor) zone->save_state();
-    }
-    const float saved = controller_.ac_setpoint();
-    setpoint_preference_.save(&saved);
-  } else {
+  const bool accepted = controller_.set_target(target);
+  if (accepted)
+    save_targets_();
+  else
     ESP_LOGW(TAG, "Rejected target %.1f", target);
-  }
-  refresh();
   return accepted;
+}
+
+bool MyAir::set_targets(std::optional<float> low, std::optional<float> high) {
+  const bool accepted = controller_.set_targets(low, high);
+  if (accepted)
+    save_targets_();
+  else
+    ESP_LOGW(TAG, "Rejected target range");
+  return accepted;
+}
+
+void MyAir::save_targets_() {
+  for (auto *zone : zones_) {
+    if (zone->sensor) zone->save_state();
+  }
+  const float saved = controller_.ac_setpoint();
+  setpoint_preference_.save(&saved);
+}
+
+bool MyAir::has_temperature_zones() const {
+  for (const auto *zone : zones_) {
+    if (zone->sensor) return true;
+  }
+  return false;
 }
 
 void MyAir::pair_sensor(uint8_t zone, bool enabled) {

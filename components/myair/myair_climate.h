@@ -5,8 +5,8 @@
 
 namespace esphome::myair {
 
-// The AC: mode, fan and target. Its temperature is the reference zone's and its target the edge it works to, which a
-// write sets in every room. The hub keeps the state; this entity only shows and changes it.
+// The AC: mode, fan and the reference room's targets. Target writes apply to every room once; subsequent room edits
+// remain independent. The hub keeps the state; this entity only shows and changes it.
 class SystemClimate : public climate::Climate, public Component {
  public:
   explicit SystemClimate(MyAir *parent) : parent_(parent) {
