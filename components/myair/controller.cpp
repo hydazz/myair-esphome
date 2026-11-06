@@ -21,9 +21,8 @@ static constexpr float BEHIND = 0.3f;
 // before the trim comes off (°C).
 static constexpr float TRIM_LIMIT = 1.0f;
 static constexpr float TRIM_RELEASE = 0.2f;
-// The control box holds the reference zone's damper at its maximum, the system's one guaranteed air path. A zone
-// carries the AC on its own with more than this share of the largest zone's airflow at its maximum damper; less is a
-// zone the installer throttled down, such as a toilet, which only gets air alongside a larger one.
+// Exclude heavily throttled rooms from running the AC alone. This relative cutoff is a policy heuristic, not a
+// measured minimum airflow. The reference reports its maximum damper position, not verified flow.
 static constexpr float CARRIES = 0.15f;
 // Fan Auto runs medium only with this share of the system's airflow open at the control box's damper positions, and
 // high only with this much. More fan into a few small ducts adds pressure rather than air.
@@ -326,7 +325,9 @@ bool Controller::carries_(uint8_t zone) const {
   return weight_(zone) > CARRIES * largest;
 }
 
-bool Controller::carrying_(uint8_t zone) const { return on_(zone) && sensor_zone_(zone) && carries_(zone); }
+bool Controller::carrying_(uint8_t zone) const {
+  return on_(zone) && std::isfinite(temperature(zone)) && carries_(zone);
+}
 
 bool Controller::candidate_(uint8_t zone) const { return carrying_(zone) && open_(zone); }
 

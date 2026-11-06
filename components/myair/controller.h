@@ -95,8 +95,8 @@ class Controller {
   float weight_(uint8_t zone) const;
   Action zone_action_(uint8_t zone) const;
   bool carries_(uint8_t zone) const;
-  // An on room with a sensor that carries the AC: it can run the AC and choose Auto's side, and once open it is a
-  // candidate for the reference.
+  // An on room with a readable temperature that carries the AC: it can run the AC and choose Auto's side, and once open
+  // it is a candidate for the reference.
   bool carrying_(uint8_t zone) const;
   bool candidate_(uint8_t zone) const;
   Side choose_side_(uint32_t now);

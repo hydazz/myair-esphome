@@ -1153,7 +1153,52 @@ static void test_actions() {
   CHECK(controller.action(1) == Action::OFF);
 }
 
+static void test_reference_requires_a_readable_temperature() {
+  Bus bus;
+  ready(bus, 2);
+  Controller controller(bus.session);
+  controller.set_mode(Mode::COOL);
+  for (uint8_t zone : {1, 2}) CHECK(controller.set_room(zone, {true, 20, 24}));
+  settle(bus, controller);
+  CHECK(controller.reference() == 1);
+  for (uint8_t zone : {1, 2}) {
+    auto missing = *bus.session.bank().find(kind::ZONE, zone);
+    missing.data[field::WHOLE_DEGREES] = 0xFF;
+    report(bus, missing);
+    settle(bus, controller);
+    if (zone == 1) {
+      CHECK(controller.reference() == 2 && controller.ac_mode() == Mode::COOL);
+    } else {
+      CHECK(controller.ac_mode() == Mode::OFF);
+    }
+  }
+  set_temperature(bus, 1, 25);
+  settle(bus, controller);
+  CHECK(controller.reference() == 1 && controller.ac_mode() == Mode::COOL);
+}
+
+static void test_probe_dropout_keeps_its_cached_temperature_bytes() {
+  Bus bus;
+  ready(bus);
+  Controller controller(bus.session);
+  controller.set_mode(Mode::COOL);
+  CHECK(controller.set_room(3, {true, 20, 24}));
+  // Attic before and after its probe battery was removed. Only the sensor type changed in the zone record.
+  bus.receive("getCAN 1 0703abcde0303e40130170800 0703abcde040300410001003f");
+  settle(bus, controller);
+  CHECK(controller.reference() == 3 && controller.temperature(3) == 23.8f);
+  bus.receive("getCAN 1 0703abcde0303e40030170800 0703abcde040300410001023f");
+  settle(bus, controller);
+  CHECK(!std::isfinite(controller.temperature(3)) && controller.ac_mode() == Mode::OFF);
+  CHECK(controller.room(3)->on && bus.session.bank().find(kind::LIMITS, 3)->data[field::SENSOR_ERROR] == 2);
+  bus.receive("getCAN 1 0703abcde0303a80130180200 0703abcde0403004100010033");
+  settle(bus, controller);
+  CHECK(controller.reference() == 3 && controller.ac_mode() == Mode::COOL && controller.temperature(3) == 24.2f);
+}
+
 void test_controls() {
+  test_probe_dropout_keeps_its_cached_temperature_bytes();
+  test_reference_requires_a_readable_temperature();
   test_three_constant_zones_fill_the_shortfall();
   test_idle_changeover_stays_idle();
   test_batch_readback_requires_all_latest_records();

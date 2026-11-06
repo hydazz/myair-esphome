@@ -69,6 +69,7 @@ void Session::reset_(uint32_t now) {
   active_.clear();
   readback_.clear();
   writes_.clear();
+  for (auto &sensor : sensors_) sensor.report.reset();
   sensor_index_ = 0;
   sensors_requested_ = false;
   pairing_zone_ = 0;
@@ -105,15 +106,30 @@ std::optional<uint32_t> Session::sensor_uid(uint8_t zone) const {
   return {};
 }
 
+std::optional<uint8_t> Session::sensor_report(uint8_t zone) const {
+  for (const auto &sensor : sensors_) {
+    if (sensor.zone == zone) return sensor.report;
+  }
+  return {};
+}
+
+std::optional<uint8_t> Session::sensor_error(uint8_t zone) const {
+  const auto *limits = bank_.find(kind::LIMITS, zone);
+  if (!ready_ || limits == nullptr) return {};
+  return limits->data[field::SENSOR_ERROR];
+}
+
 void Session::set_sensor(uint8_t zone, uint32_t uid) {
   if (zone == 0 || uid > 0xFFFFFF || sensor_uid(zone) == uid) return;
   bool found = false;
   for (auto &sensor : sensors_) {
     if (sensor.zone == zone) {
       sensor.uid = uid;
+      sensor.report.reset();
       found = true;
     } else if (uid != 0 && sensor.uid == uid) {
       sensor.uid = 0;
+      sensor.report.reset();
     }
   }
   if (!found) sensors_.push_back({zone, uid});
@@ -216,6 +232,17 @@ void Session::handle_(const Frame &message, uint32_t now) {
     if (record.kind == kind::ANNOUNCE || record.kind == kind::CONFIG) changed |= bank_.apply(record);
   }
   for (const auto &record : records) {
+    if (record.kind == kind::SENSOR_REPORT) {
+      if (!from_control_box_(record)) continue;
+      const uint32_t uid = (uint32_t{record.data[0]} << 16) | (uint32_t{record.data[1]} << 8) | record.data[2];
+      for (auto &sensor : sensors_) {
+        if (uid != 0 && sensor.uid == uid && sensor.report != record.data[3]) {
+          sensor.report = record.data[3];
+          changed = true;
+        }
+      }
+      continue;
+    }
     // A command can change the mode and several zone targets. Keep their readback together so consumers never
     // combine one side's mode with the other side's targets, even when the echoes arrive in separate frames.
     const bool readback =

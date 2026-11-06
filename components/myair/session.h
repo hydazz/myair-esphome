@@ -24,6 +24,8 @@ class Session {
  public:
   void set_sensor(uint8_t zone, uint32_t uid);
   std::optional<uint32_t> sensor_uid(uint8_t zone) const;
+  std::optional<uint8_t> sensor_report(uint8_t zone) const;
+  std::optional<uint8_t> sensor_error(uint8_t zone) const;
   bool start_pairing(uint8_t zone, uint32_t now);
   void cancel_pairing(uint8_t zone);
   uint8_t pairing_zone() const { return pairing_zone_; }
@@ -43,6 +45,7 @@ class Session {
   struct SensorBinding {
     uint8_t zone;
     uint32_t uid;
+    std::optional<uint8_t> report{};
   };
   enum class Phase { NEGOTIATE, RESET, DISCOVER, SNAPSHOT };
   void reset_(uint32_t now);

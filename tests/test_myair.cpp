@@ -80,6 +80,30 @@ static void test_captured_snapshot() {
   CHECK(bus.session.revision() == revision);
 }
 
+static void test_sensor_report_counter() {
+  Bus bus;
+  bus.session.set_sensor(3, 0x01186e);
+  start(bus);
+  bus.receive(snapshot(3));
+  CHECK(!bus.session.sensor_report(3));
+  bus.receive("getCAN 1 0703abcde2b01186e63122a00");
+  CHECK(bus.session.sensor_report(3) == 0x63);
+  const auto revision = bus.session.revision();
+  bus.receive("getCAN 1 0703abcde2b01186e63122a00 0703abcde2b01121078122a00 0703123452b01186e64122a00");
+  bus.receive("getCAN 1 0701abcde2b01186e64122a00");
+  CHECK(bus.session.revision() == revision);
+  bus.receive(snapshot(3));
+  CHECK(bus.session.sensor_report(3) == 0x63);
+  bus.receive("getCAN 1 0703abcde2b01186eff122a00 0703abcde2b01186e00122a00");
+  CHECK(bus.session.sensor_report(3) == 0);
+  bus.session.set_sensor(1, 0x01186e);
+  CHECK(!bus.session.sensor_report(1) && !bus.session.sensor_report(3));
+  bus.receive("getCAN 1 0703abcde2b01186e01122a00");
+  CHECK(bus.session.sensor_report(1) == 1 && !bus.session.sensor_report(3));
+  bus.session.tick(bus.now + 5000);
+  CHECK(!bus.session.sensor_report(1));
+}
+
 static void test_zone_counts_and_partial_snapshot() {
   for (uint8_t count : {0, 1, 3, 10}) {
     Bus bus;
@@ -434,6 +458,7 @@ int main() {
   test_frames();
   test_records();
   test_captured_snapshot();
+  test_sensor_report_counter();
   test_zone_counts_and_partial_snapshot();
   test_errors_do_not_change_state();
   test_retry_and_discovery();

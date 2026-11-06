@@ -24,12 +24,15 @@ constexpr uint8_t SYSTEM = 0x05;
 // From the ESP, a request to resend every record; from the control box, its firmware, which the ESP acknowledges.
 constexpr uint8_t FLUSH = 0x06;
 constexpr uint8_t FIRMWARE_ACK = 0x07;
+constexpr uint8_t AC_ERROR = 0x08;
 constexpr uint8_t ANNOUNCE = 0x0A;
 // A sensor assignment to the control box, or a sensor's pair button from it.
 constexpr uint8_t SENSOR = 0x12;
 // The control box asking for its sensor assignments.
 constexpr uint8_t SENSOR_TABLE = 0x13;
 constexpr uint8_t RF_PAIRING = 0x26;
+// A wireless probe's UID and its eight-bit report counter.
+constexpr uint8_t SENSOR_REPORT = 0x2B;
 }  // namespace kind
 
 // Fields of the config, zone, limits and system records.
@@ -40,7 +43,8 @@ constexpr uint8_t ZONE_NUMBER = 0;
 // The damper field holds the open bit and the position in percent.
 constexpr uint8_t DAMPER = 1, SENSOR_TYPE = 2, SETPOINT = 3, WHOLE_DEGREES = 4, TENTHS = 5;
 constexpr uint8_t OPEN = 0x80, POSITION = 0x7F;
-constexpr uint8_t MIN_DAMPER = 1, MAX_DAMPER = 2;
+constexpr uint8_t MIN_DAMPER = 1, MAX_DAMPER = 2, SENSOR_ERROR = 5;
+constexpr uint8_t CHECK_BATTERY = 0x02;
 constexpr uint8_t POWER = 0, MODE = 1, FAN = 2, AC_SETPOINT = 3, REFERENCE = 4;
 }  // namespace field
 
