@@ -10,7 +10,7 @@ ESPHome gives me declarative controls and pushes state updates as they arrive fr
 
 ## 🔌 Hardware
 
-An ESP32 with a hardware UART and a 3.3 V RS-485 transceiver. I'm using an ATOMS3 Lite with an A131 Atomic RS485 base, connected to the CB10's touchscreen port. The A131 switches direction automatically.
+An ESP32 with a hardware UART and a 3.3 V RS-485 transceiver. I'm using an ATOMS3 Lite with an A131 Atomic RS485 base, connected to the CB10's touchscreen port. The A131 handles transmit enable in hardware.
 
 <p>
   <img src="docs/images/cb10.jpeg" alt="cb10" height="320">
@@ -32,7 +32,7 @@ Only one controller can drive the bus.
 
 ## ⚙️ Configuration
 
-Add to an ESPHome device config. These UART pins are for the ATOMS3 Lite and A131:
+Example configuration for the ATOMS3 Lite and A131:
 
 ```yaml
 external_components:
