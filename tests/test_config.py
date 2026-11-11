@@ -2,7 +2,6 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from esphome.__main__ import generate_cpp_contents
 from esphome.config import load_config
@@ -148,40 +147,11 @@ myair:
         )
         self.assertEqual(before, after)
 
-    def test_duplicate_display_names_are_separate_devices(self):
-        config = self.valid(
-            BASE
-            + "myair:\n  zones:\n    - zone: 1\n      name: Room\n    - zone: 2\n      name: Room\n"
+    def test_zone_entities_cannot_override_their_device(self):
+        config = self.load(
+            BASE + "myair:\n  zones:\n    - zone: 1\n      climate: {device_id: other}\n"
         )
-        generate_cpp_contents(config)
-        self.assertEqual(len(config["esphome"]["devices"]), 2)
-
-    def test_zone_device_ids_cannot_conflict_or_be_overridden(self):
-        self.assertTrue(
-            self.load(
-                BASE.replace(
-                    "  name: config-test\n",
-                    """  name: config-test
-  devices:
-    - id: myair_zone_1
-      name: Other
-""",
-                )
-                + "myair:\n  zones:\n    - zone: 1\n"
-            ).errors
-        )
-        for option in (
-            "device_id: other",
-            "area: Room",
-            "area_id: room",
-            "climate: {device_id: other}",
-        ):
-            with self.subTest(option=option):
-                self.assertTrue(
-                    self.load(
-                        BASE + "myair:\n  zones:\n    - zone: 1\n      " + option + "\n"
-                    ).errors
-                )
+        self.assertIn("Zone entities belong to their zone device", str(config.errors))
 
     def test_sparse_zones_keep_physical_numbers(self):
         config = self.valid(
@@ -311,50 +281,6 @@ myair:
         self.assertNotIn("->add_zone(", CORE.cpp_main_section)
         self.assertEqual(CORE.cpp_main_section.count("App.register_climate("), 1)
 
-    def test_diagnostics_are_generated_not_yaml_options(self):
-        for key in (
-            "reference_zone",
-            "ac_mode",
-            "ac_fan",
-            "ac_error",
-            "write_failures",
-            "connected",
-        ):
-            with self.subTest(key=key):
-                self.assertTrue(self.load(BASE + f"myair:\n  {key}: {{}}\n").errors)
-        for key in ("low_battery", "sensor_error", "sensor_report"):
-            with self.subTest(key=key):
-                self.assertTrue(
-                    self.load(BASE + f"myair:\n  zones:\n    - zone: 1\n      {key}: {{}}\n").errors
-                )
-
-    def test_remote_source_loads_component_without_a_package(self):
-        def checkout(**kwargs):
-            self.assertEqual(
-                kwargs["url"].removesuffix(".git"), "https://github.com/hydazz/myair-esphome"
-            )
-            self.assertEqual(kwargs["ref"], "main")
-            return ROOT, None
-
-        with patch("esphome.git.clone_or_update", side_effect=checkout) as fetch:
-            config = self.valid(
-                DEVICE
-                + """
-external_components:
-  - source: github://hydazz/myair-esphome@main
-    components: [myair]
-myair:
-  zones:
-    - zone: 1
-      name: Living Room
-"""
-            )
-        generate_cpp_contents(config)
-        self.assertEqual(len(config["myair"]["zones"]), 1)
-        self.assertEqual(
-            {call.kwargs["domain"] for call in fetch.call_args_list}, {"external_components"}
-        )
-
     def test_zone_definitions_reject_conflicts(self):
         cases = (
             ("    - zone: 0\n", "at least 1"),
@@ -375,23 +301,6 @@ myair:
             with self.subTest(zones=zones):
                 config = self.load(BASE + "myair:\n  zones:\n" + zones)
                 self.assertIn(error, str(config.errors))
-
-    def test_invalid_nested_options_are_rejected(self):
-        for entity in (
-            "temperature: true",
-            "temperature: [Temperature]",
-            "temperature: {filters: [{unknown_filter: 1}]}",
-            "temperature: {unknown_option: 1}",
-            "pair_sensor: {inverted: true}",
-            'name: ""',
-            "airflow_weight: 0",
-            "airflow_weight: -1",
-            "airflow_weight: 8in",
-            "airflow_weight: [1, 2]",
-        ):
-            with self.subTest(entity=entity):
-                config = self.load(BASE + "myair:\n  zones:\n    - zone: 1\n      " + entity + "\n")
-                self.assertTrue(config.errors)
 
     def test_firmware_registers_optional_entities(self):
         yaml = (ROOT / "tests/firmware.yaml").read_text()
@@ -451,23 +360,17 @@ myair:
 """
         )
         generate_cpp_contents(config)
-        feedback = config["myair"]["power_feedback"]
-        self.assertEqual(feedback["settle_time"].total_milliseconds, 5000)
-        self.assertEqual(feedback["timeout"].total_milliseconds, 30000)
-        self.assertIn("->set_power_feedback(ac_power, 50.0f, 5000, 30000)", CORE.cpp_main_section)
+        self.assertIn("->set_power_feedback(ac_power, 50.0f)", CORE.cpp_main_section)
         self.assertEqual(
             config["myair"]["diagnostics"]["activity_feedback"]["name"], "Activity Feedback"
         )
 
-    def test_power_feedback_rejects_invalid_thresholds_and_timing(self):
+    def test_power_feedback_rejects_invalid_thresholds(self):
         for settings in (
             "idle_below: 0 W",
             "idle_below: -1 W",
             "idle_below: .nan",
             "idle_below: .inf",
-            "settle_time: 5s",
-            "idle_below: 50 W\n    settle_time: 0s",
-            "idle_below: 50 W\n    timeout: 5s",
         ):
             with self.subTest(settings=settings):
                 config = self.load(

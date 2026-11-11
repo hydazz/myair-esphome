@@ -4,44 +4,16 @@
 
 namespace esphome::myair {
 
-void Activity::set_power_config(PowerConfig config) {
-  config_ = config;
-  feedback_ = Feedback::WAITING;
-  idle_.reset();
-  candidate_.reset();
+Feedback Activity::feedback() const {
+  if (!idle_below_) return Feedback::NOT_CONFIGURED;
+  return idle_.has_value() ? Feedback::POWER : Feedback::UNAVAILABLE;
 }
 
-bool Activity::tick(uint32_t now) {
-  if (!config_ || feedback_ == Feedback::UNAVAILABLE || feedback_ == Feedback::STALE ||
-      now - last_sample_ < config_->timeout)
-    return false;
-  feedback_ = Feedback::STALE;
-  idle_.reset();
-  candidate_.reset();
-  return true;
-}
-
-void Activity::update_power(float watts, uint32_t now) {
-  if (!config_) return;
-  tick(now);
-  if (!std::isfinite(watts) || watts < 0) {
-    feedback_ = Feedback::UNAVAILABLE;
+void Activity::update_power(float watts) {
+  if (idle_below_ && std::isfinite(watts) && watts >= 0)
+    idle_ = watts < *idle_below_;
+  else
     idle_.reset();
-    candidate_.reset();
-    return;
-  }
-  last_sample_ = now;
-  const bool next = watts < config_->idle_below;
-  if (idle_ == next) {
-    candidate_.reset();
-  } else if (candidate_ != next) {
-    candidate_ = next;
-    candidate_since_ = now;
-  } else if (now - candidate_since_ >= config_->settle_time) {
-    idle_ = next;
-    candidate_.reset();
-  }
-  feedback_ = idle_.has_value() ? Feedback::POWER : Feedback::WAITING;
 }
 
 std::optional<Action> Activity::system(std::optional<EquipmentState> equipment) const {

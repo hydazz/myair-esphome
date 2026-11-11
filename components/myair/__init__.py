@@ -317,27 +317,18 @@ def register_devices(config):
     return config
 
 
-def validate_power_feedback(config):
-    threshold = config["idle_below"]
-    if not math.isfinite(threshold) or threshold <= 0:
+def idle_threshold(value):
+    value = cv.float_with_unit("power", "(W|w)?")(value)
+    if not math.isfinite(value) or value <= 0:
         raise cv.Invalid("idle_below must be finite and positive")
-    if config["settle_time"].total_milliseconds <= 0:
-        raise cv.Invalid("settle_time must be positive")
-    if config["timeout"].total_milliseconds <= config["settle_time"].total_milliseconds:
-        raise cv.Invalid("timeout must exceed settle_time")
-    return config
+    return value
 
 
-POWER_FEEDBACK_SCHEMA = cv.All(
-    cv.Schema(
-        {
-            cv.Required("sensor"): cv.use_id(sensor.Sensor),
-            cv.Required("idle_below"): cv.float_with_unit("power", "(W|w)?"),
-            cv.Optional("settle_time", default="5s"): cv.positive_time_period_milliseconds,
-            cv.Optional("timeout", default="30s"): cv.positive_time_period_milliseconds,
-        }
-    ),
-    validate_power_feedback,
+POWER_FEEDBACK_SCHEMA = cv.Schema(
+    {
+        cv.Required("sensor"): cv.use_id(sensor.Sensor),
+        cv.Required("idle_below"): idle_threshold,
+    }
 )
 
 
@@ -381,14 +372,7 @@ async def to_code(config):
 
     if feedback := config.get("power_feedback"):
         source = await cg.get_variable(feedback["sensor"])
-        cg.add(
-            var.set_power_feedback(
-                source,
-                feedback["idle_below"],
-                feedback["settle_time"],
-                feedback["timeout"],
-            )
-        )
+        cg.add(var.set_power_feedback(source, feedback["idle_below"]))
 
     if config.get("climate"):
         entity = await climate.new_climate(config["climate"], var)

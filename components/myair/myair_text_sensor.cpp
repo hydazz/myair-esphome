@@ -12,7 +12,7 @@ void MyAirTextSensor::publish_(const char *value) {
 void MyAirTextSensor::refresh() {
   char text[16];
   if (type_ == TextSensorType::ACTIVITY_FEEDBACK) {
-    static const char *const FEEDBACK[] = {"Not configured", "Waiting", "Power", "Unavailable", "Stale"};
+    static const char *const FEEDBACK[] = {"Not configured", "Power", "Unavailable"};
     publish_(FEEDBACK[static_cast<uint8_t>(parent_->feedback())]);
     return;
   }

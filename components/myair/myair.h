@@ -48,7 +48,7 @@ class MyAir : public Component, public uart::UARTDevice {
   const Session &session() const { return session_; }
   std::optional<Action> activity() const { return activity_.system(session_.equipment()); }
   Feedback feedback() const { return activity_.feedback(); }
-  void set_power_feedback(sensor::Sensor *sensor, float idle_below, uint32_t settle_time, uint32_t timeout);
+  void set_power_feedback(sensor::Sensor *sensor, float idle_below);
   void set_mode(Mode mode);
   void set_fan(Fan fan);
   bool set_room(uint8_t zone, const Room &room);

@@ -80,11 +80,10 @@ void MyAir::set_mode(Mode mode) {
   save_system_();
 }
 
-void MyAir::set_power_feedback(sensor::Sensor *sensor, float idle_below, uint32_t settle_time, uint32_t timeout) {
-  activity_.set_power_config({idle_below, settle_time, timeout});
-  // Only real samples refresh freshness; filters can repeatedly publish an old value.
-  sensor->add_on_raw_state_callback([this](float watts) {
-    activity_.update_power(watts, millis());
+void MyAir::set_power_feedback(sensor::Sensor *sensor, float idle_below) {
+  activity_.set_idle_below(idle_below);
+  sensor->add_on_state_callback([this](float watts) {
+    activity_.update_power(watts);
     publish_();
   });
 }
@@ -209,8 +208,7 @@ void MyAir::loop() {
     }
   }
   controller_.step(millis());
-  const bool feedback_changed = activity_.tick(millis());
-  if (revision_ != session_.revision() || feedback_changed) {
+  if (revision_ != session_.revision()) {
     revision_ = session_.revision();
     publish_();
   }

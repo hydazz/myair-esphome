@@ -88,7 +88,6 @@ void Session::reset_(uint32_t now) {
   active_.clear();
   writes_.clear();
   for (auto &sensor : sensors_) sensor.report.reset();
-  sensor_index_ = 0;
   sensors_requested_ = false;
   pairing_zone_ = 0;
   generation_++;
@@ -138,7 +137,7 @@ std::optional<uint8_t> Session::sensor_error(uint8_t zone) const {
 }
 
 void Session::set_sensor(uint8_t zone, uint32_t uid) {
-  if (zone == 0 || uid > 0xFFFFFF || sensor_uid(zone) == uid) return;
+  if (zone == 0 || zone > 10 || uid > 0xFFFFFF || sensor_uid(zone) == uid) return;
   bool found = false;
   for (auto &sensor : sensors_) {
     if (sensor.zone == zone) {
@@ -153,7 +152,6 @@ void Session::set_sensor(uint8_t zone, uint32_t uid) {
   if (!found) sensors_.push_back({zone, uid});
   // Clear old assignments before assigning a probe to another zone.
   std::stable_partition(sensors_.begin(), sensors_.end(), [](const SensorBinding &sensor) { return sensor.uid == 0; });
-  sensor_index_ = 0;
   sensors_requested_ = true;
   revision_++;
 }
@@ -287,7 +285,6 @@ void Session::handle_(const Frame &message, uint32_t now) {
       }
     }
     if (record.kind == kind::SENSOR_TABLE && from_control_box_(record)) {
-      sensor_index_ = 0;
       sensors_requested_ = true;
     }
     if (record.kind == kind::FLUSH && record.unit_id != 0 && (record.direction == 0x03 || record.direction == 0x04) &&
@@ -307,7 +304,6 @@ void Session::handle_(const Frame &message, uint32_t now) {
     changed = true;
   }
   if (!had_control_box && bank_.has_control_box()) {
-    sensor_index_ = 0;
     sensors_requested_ = true;
   }
   const bool ready = snapshot_requested_ && bank_.complete();
@@ -392,8 +388,7 @@ std::string Session::on_ping_(uint32_t now) {
   const auto *config = bank_.find(kind::CONFIG);
   if (sensors_requested_ && config != nullptr) {
     std::vector<Record> bindings;
-    while (sensor_index_ < sensors_.size() && bindings.size() < 25) {
-      const auto &sensor = sensors_[sensor_index_++];
+    for (const auto &sensor : sensors_) {
       if (sensor.zone > config->data[field::ZONE_COUNT]) continue;
       auto binding = request(bank_.unit_type(), bank_.unit_id(), kind::SENSOR);
       binding.data = {static_cast<uint8_t>(sensor.uid >> 16),
@@ -405,7 +400,7 @@ std::string Session::on_ping_(uint32_t now) {
                       0};
       bindings.push_back(binding);
     }
-    sensors_requested_ = sensor_index_ < sensors_.size();
+    sensors_requested_ = false;
     if (!bindings.empty()) return send_(set_can(bindings));
   }
   if (ready_ && active_.empty()) {

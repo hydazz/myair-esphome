@@ -84,7 +84,6 @@ class Session {
   uint32_t write_started_{};
   bool readback_requested_{};
   std::vector<SensorBinding> sensors_;
-  size_t sensor_index_{};
   bool sensors_requested_{};
   uint8_t pairing_zone_{};
   uint8_t pairing_active_zone_{};

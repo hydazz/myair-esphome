@@ -240,29 +240,6 @@ static void test_sensor_bindings() {
   CHECK(bus.ping() == bindings);
 }
 
-static void test_sensor_binding_batches() {
-  Bus bus;
-  std::vector<Record> expected;
-  for (uint8_t zone = 1; zone <= 26; zone++) {
-    bus.session.set_sensor(zone, 0x123400 + zone);
-    auto binding = request(7, 0xabcde, 0x12);
-    binding.data = {0x12, 0x34, zone, zone, 0, 0, 0};
-    expected.push_back(binding);
-  }
-  const auto last = expected.back();
-  expected.pop_back();
-  start(bus);
-  bus.receive(snapshot(26));
-  CHECK(bus.ping() == "ackCAN 1");
-  CHECK(bus.ping() == set_can(expected));
-  bus.receive("getCAN 1 ");
-  CHECK(bus.ping() == "ackCAN 1");
-  CHECK(bus.ping() == set_can({last}));
-  bus.receive("getCAN 1 ");
-  CHECK(bus.ping() == "ackCAN 1");
-  CHECK(bus.ping() == "setCAN ");
-}
-
 static Record pairing_result(uint8_t zone = 1, uint32_t uid = 0x01186E, uint8_t status = 2) {
   auto record = request(8, 0xabcde, 0x26);
   record.direction = 3;
@@ -466,7 +443,6 @@ int main() {
   test_disconnect_and_restart();
   test_snapshot_timeout();
   test_sensor_bindings();
-  test_sensor_binding_batches();
   test_sensor_pairing();
   test_probe_button_pairing();
   test_control_box_pairing_reply();

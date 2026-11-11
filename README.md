@@ -129,19 +129,21 @@ No compressor status flag has been identified on the bus. Without a power meter,
 An optional sensor in watts adds Idle detection:
 
 ```yaml
+sensor:
+  - platform: homeassistant
+    id: ac_power
+    entity_id: sensor.ac_power
+    internal: true
+
 myair:
   uart_id: cb_uart
   power_feedback:
     sensor: ac_power
-    idle_below: 50 W
-    settle_time: 5s
-    timeout: 60s
+    idle_below: 75 W
   # zones: ...
 ```
 
-Choose `idle_below` above your standby draw. Fresh samples must stay on the new side of the threshold for `settle_time` before the action changes. The defaults are 5 seconds to settle and 30 seconds before readings expire. Missing, invalid or stale feedback falls back to the confirmed mode. This only affects reporting.
-
-Importing the power entity from Home Assistant left unchanged readings going stale, with no way to tell whether the meter was still reporting. Feed meter responses directly over MQTT into `ac_power`, including unchanged values. Each actual response refreshes its age; an ESPHome heartbeat filter doesn't. The input uses raw sensor values, before filters.
+Choose `idle_below` above your standby draw. While enabled, readings below it report Idle; readings at or above it use the confirmed mode. Confirmed Off always reports Off. Invalid or unavailable readings fall back to the mode; no new reading leaves the last value in use. Power feedback only affects the displayed activity.
 
 Room actions follow the system action and damper position. In heating or cooling, the box's 5% idle position reports Idle; an open reference room can still show Heating or Cooling after reaching its target. Damper position is a command, not measured heat delivery.
 
@@ -163,7 +165,7 @@ The box repeats cached temperatures between RF reports. After removing a probe b
 
 ## Diagnostics
 
-**Reference Zone**, **AC Mode** and **AC Fan** show what the box reports. The climate retains the requested mode and fan, so Auto can appear alongside Cool and Low. **AC Error** exposes equipment errors; **Activity Feedback** shows whether power readings are in use, waiting, unavailable or stale.
+**Reference Zone**, **AC Mode** and **AC Fan** show what the box reports. The climate retains the requested mode and fan, so Auto can appear alongside Cool and Low. **AC Error** exposes equipment errors; **Activity Feedback** shows Power, Unavailable or Not configured.
 
 **Connected** tracks communication with the box. Check it if climate values look stuck: Home Assistant 2026.11.1 retains climate values when ESPHome marks their state missing.
 

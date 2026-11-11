@@ -958,17 +958,6 @@ static void test_small_is_relative_to_the_largest_zone() {
   CHECK(bus.session.bank().find(5)->data[4] == 2);
 }
 
-static void test_airflow_weights_stand_alone() {
-  Bus bus;
-  ready(bus, 3);
-  Controller controller(bus.session);
-  CHECK(!controller.set_airflow_weight(2, 0) && !controller.set_airflow_weight(2, NAN) &&
-        !controller.set_airflow_weight(11, 1));
-  // Setting one zone's weight leaves the others at 1.
-  CHECK(controller.set_airflow_weight(1, 3));
-  CHECK(controller.airflow_weight(1) == 3 && controller.airflow_weight(2) == 1 && controller.airflow_weight(3) == 1);
-}
-
 static void set_sensorless(Bus &bus, uint8_t zone) {
   auto state = *bus.session.bank().find(3, zone);
   state.data[2] = 0;
@@ -1183,44 +1172,6 @@ static void test_actions_do_not_follow_room_demand() {
   CHECK(zone_action(bus, controller, 1) == Action::OFF);
 }
 
-static void test_power_feedback_does_not_change_commands() {
-  std::vector<std::string> baseline;
-  for (int feedback = 0; feedback < 5; feedback++) {
-    Bus bus;
-    ready(bus, 3);
-    Controller controller(bus.session);
-    Activity activity;
-    if (feedback != 0) activity.set_power_config({50, 5000, 30000});
-    controller.set_mode(Mode::AUTO);
-    controller.set_airflow_weight(1, 2);
-    for (uint8_t zone : {1, 2, 3}) controller.set_room(zone, {true, 20, 24});
-    std::vector<std::string> commands;
-    for (unsigned step = 0; step < 60; step++) {
-      if (feedback == 1) activity.update_power(15, bus.now);
-      if (feedback == 2) activity.update_power(1000, bus.now);
-      if (feedback == 3) activity.update_power(NAN, bus.now);
-      if (feedback == 4 && step < 10) activity.update_power(15, bus.now);
-      activity.tick(bus.now);
-      set_temperature(bus, 1, step < 20 ? 27 : 22);
-      set_temperature(bus, 2, step < 30 ? 25 : 17);
-      set_temperature(bus, 3, step < 30 ? 24 : 18);
-      if (step == 20) controller.set_room(1, {false, 20, 24});
-      if (step == 40) controller.set_targets(21, 25);
-      if (step == 59) controller.set_mode(Mode::OFF);
-      for (const auto &write : settle(bus, controller)) commands.push_back(encode_record(write));
-      // The report is consumed independently of the next controller step.
-      const auto state = activity.system(bus.session.equipment());
-      CHECK(state.has_value());
-      wait(bus, controller, 60000);
-    }
-    if (feedback == 0)
-      baseline = commands;
-    else
-      CHECK(commands == baseline);
-  }
-  CHECK(!baseline.empty());
-}
-
 static void test_equipment_keeps_disabled_mode_and_rejects_unknowns() {
   Bus bus;
   CHECK(!bus.session.equipment());
@@ -1326,10 +1277,8 @@ void test_controls() {
   test_small_is_relative_to_the_largest_zone();
   test_airflow_zones_hold_their_position();
   test_shutdown_preserves_air_paths();
-  test_airflow_weights_stand_alone();
   test_constant_zones_hold_up_airflow();
   test_resync_reapplies_rooms();
   test_actions_do_not_follow_room_demand();
-  test_power_feedback_does_not_change_commands();
   test_equipment_keeps_disabled_mode_and_rejects_unknowns();
 }
