@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,11 +55,11 @@ class ConfigurationTest(unittest.TestCase):
         generate_cpp_contents(config)
         for n, zone in enumerate(config["myair"]["zones"], 1):
             self.assertEqual(zone["name"], f"Zone {n}")
-            self.assertEqual(zone["climate"]["name"], f"Zone {n}")
-            self.assertEqual(zone["temperature"]["name"], f"Zone {n} Temperature")
-            self.assertEqual(zone["damper"]["name"], f"Zone {n} Damper")
+            self.assertEqual(zone["climate"]["name"], "Climate")
+            self.assertEqual(zone["temperature"]["name"], "Temperature")
+            self.assertEqual(zone["damper"]["name"], "Damper")
             probe = zone["diagnostics"]
-            self.assertEqual(probe["low_battery"]["name"], f"Zone {n} Low Battery")
+            self.assertEqual(probe["low_battery"]["name"], "Low Battery")
             self.assertFalse(probe["low_battery"]["disabled_by_default"])
             for key in ("sensor_report", "sensor_error"):
                 self.assertTrue(probe[key]["disabled_by_default"])
@@ -72,48 +73,115 @@ class ConfigurationTest(unittest.TestCase):
             ("climate", 11),
             ("sensor", 41),
             ("number", 0),
-            ("text_sensor", 4),
+            ("text_sensor", 5),
             ("binary_sensor", 11),
             ("switch", 0),
             ("button", 0),
         ):
             self.assertEqual(CORE.cpp_main_section.count(f"App.register_{domain}("), count)
 
-    def test_device_zones_take_names_from_their_devices(self):
+    def test_zones_register_devices_without_areas(self):
+        config = self.valid(BASE + "myair:\n  zones:\n    - zone: 1\n      name: Living Room\n")
+        generate_cpp_contents(config)
+        devices = config["esphome"]["devices"]
+        self.assertEqual(
+            [(str(d["id"]), d["name"]) for d in devices], [("myair_zone_1", "Living Room")]
+        )
+        self.assertEqual(config["esphome"]["areas"], [])
+        self.assertNotIn("area_id", devices[0])
+        self.assertNotIn("set_area_id(", CORE.cpp_main_section)
+        self.assertIn("App.register_device(myair_zone_1)", CORE.cpp_main_section)
+        self.assertEqual(CORE.cpp_main_section.count("set_device_(myair_zone_1)"), 6)
+        self.assertNotIn("device_id", config["myair"]["climate"])
+        for diagnostic in config["myair"]["diagnostics"].values():
+            self.assertNotIn("device_id", diagnostic)
+
+    def test_generated_devices_coexist_with_other_devices(self):
         config = self.valid(
             BASE.replace(
                 "  name: config-test\n",
                 """  name: config-test
-  areas:
-    - id: living_room
-      name: Living Room
   devices:
-    - id: living_room_zone
-      name: Living Room Zone
-      area_id: living_room
+    - id: utility
+      name: Utility
 """,
             )
             + """
+sensor:
+  - platform: template
+    name: Temperature
+    device_id: utility
 myair:
   zones:
-    - zone: 1
-      device_id: living_room_zone
-      sensor_id: {}
+    - zone: 7
+    - zone: 2
 """
         )
         generate_cpp_contents(config)
-        zone = config["myair"]["zones"][0]
-        self.assertNotIn("name", zone)
-        self.assertEqual(zone["climate"]["name"], "")
-        self.assertEqual(zone["temperature"]["name"], "Temperature")
-        self.assertEqual(zone["sensor_id"]["name"], "Sensor UID")
-        self.assertEqual(zone["diagnostics"]["low_battery"]["device_class"], "battery")
-        for diagnostic in zone["diagnostics"].values():
-            self.assertEqual(str(diagnostic["device_id"]), "living_room_zone")
-        for key in ("climate", "temperature", "damper", "sensor_id"):
-            self.assertEqual(str(zone[key]["device_id"]), "living_room_zone")
-        self.assertIn('1, "Living Room Zone", true);', CORE.cpp_main_section)
-        self.assertEqual(CORE.cpp_main_section.count("set_device_(living_room_zone)"), 7)
+        self.assertEqual(
+            [str(d["id"]) for d in config["esphome"]["devices"]],
+            ["utility", "myair_zone_7", "myair_zone_2"],
+        )
+        self.assertEqual(CORE.cpp_main_section.count("App.register_device("), 3)
+        defines = {d.name: str(d.value) for d in CORE.defines}
+        self.assertEqual(defines["ESPHOME_DEVICE_COUNT"], "3")
+        self.assertNotIn("USE_AREAS", defines)
+        self.assertIn("set_device_(utility)", CORE.cpp_main_section)
+
+    def test_zone_renaming_and_order_keep_device_and_entity_keys(self):
+        def identity(zones):
+            config = self.valid(BASE + "myair:\n  zones:\n" + zones)
+            generate_cpp_contents(config)
+            cpp = CORE.cpp_main_section
+            devices = sorted(re.findall(r"(myair_zone_\d+)->set_device_id\((\d+)(?:UL)?\)", cpp))
+            entities = sorted(re.findall(r'App.register_(\w+)\(\w+, "([^"]*)", (\d+)(?:UL)?,', cpp))
+            self.assertEqual(len(devices), 2)
+            self.assertTrue(entities)
+            return devices, entities
+
+        before = identity(
+            "    - zone: 1\n      name: Living Room\n    - zone: 7\n      sensor: false\n"
+        )
+        after = identity(
+            "    - zone: 7\n      name: Garage\n      sensor: false\n"
+            "    - zone: 1\n      name: Lounge\n"
+        )
+        self.assertEqual(before, after)
+
+    def test_duplicate_display_names_are_separate_devices(self):
+        config = self.valid(
+            BASE
+            + "myair:\n  zones:\n    - zone: 1\n      name: Room\n    - zone: 2\n      name: Room\n"
+        )
+        generate_cpp_contents(config)
+        self.assertEqual(len(config["esphome"]["devices"]), 2)
+
+    def test_zone_device_ids_cannot_conflict_or_be_overridden(self):
+        self.assertTrue(
+            self.load(
+                BASE.replace(
+                    "  name: config-test\n",
+                    """  name: config-test
+  devices:
+    - id: myair_zone_1
+      name: Other
+""",
+                )
+                + "myair:\n  zones:\n    - zone: 1\n"
+            ).errors
+        )
+        for option in (
+            "device_id: other",
+            "area: Room",
+            "area_id: room",
+            "climate: {device_id: other}",
+        ):
+            with self.subTest(option=option):
+                self.assertTrue(
+                    self.load(
+                        BASE + "myair:\n  zones:\n    - zone: 1\n      " + option + "\n"
+                    ).errors
+                )
 
     def test_sparse_zones_keep_physical_numbers(self):
         config = self.valid(
@@ -166,11 +234,11 @@ myair:
         hub = config["myair"]
         zone = hub["zones"][0]
         self.assertEqual(hub["climate"]["name"], "Ducted AC")
-        self.assertEqual(zone["climate"]["name"], "Living Room")
+        self.assertEqual(zone["climate"]["name"], "Climate")
         self.assertEqual(zone["temperature"]["accuracy_decimals"], 2)
         self.assertEqual(zone["temperature"]["filters"][0]["throttle"].total_seconds, 10)
         self.assertEqual(zone["damper"]["name"], "Living Room Airflow")
-        self.assertEqual(zone["temperature_offset"]["name"], "Living Room Temperature Offset")
+        self.assertEqual(zone["temperature_offset"]["name"], "Temperature Offset")
         self.assertIn("->set_airflow_weight(1, 2.5", CORE.cpp_main_section)
         self.assertIn(
             "living_climate->set_visual_max_temperature_override(28", CORE.cpp_main_section
@@ -215,7 +283,7 @@ myair:
         )
         generate_cpp_contents(config)
         zone = config["myair"]["zones"][0]
-        self.assertEqual(zone["cover"]["name"], "Garage")
+        self.assertEqual(zone["cover"]["name"], "Damper")
         self.assertEqual(zone["cover"]["device_class"], "damper")
         for key in ("climate", "temperature", "damper", "diagnostics", "min_damper", "max_damper"):
             self.assertNotIn(key, zone)
@@ -293,10 +361,8 @@ myair:
             ("    - zone: 11\n", "at most 10"),
             (
                 "    - zone: 1\n      name: Living\n    - zone: 1\n      name: Bedroom\n",
-                "configured once",
+                "Duplicate",
             ),
-            ("    - zone: 1\n      name: Zone 2\n    - zone: 2\n", "Duplicate"),
-            ("    - zone: 1\n      device_id: missing\n", "missing"),
             ('    - zone: 1\n      sensor_uid: "000000"\n', "nonzero six-digit"),
             ('    - zone: 1\n      sensor_uid: "01186"\n', "nonzero six-digit"),
             (
@@ -347,11 +413,77 @@ myair:
         for entity in hub["diagnostics"].values():
             self.assertEqual(entity["entity_category"], "diagnostic")
         self.assertEqual(hub["climate"]["name"], "")
+        for zone in hub["zones"]:
+            expected = f"myair_zone_{zone['zone']}"
+            for key in (
+                "climate",
+                "cover",
+                "temperature",
+                "damper",
+                "temperature_offset",
+                "min_damper",
+                "max_damper",
+                "pair_sensor",
+                "unpair_sensor",
+                "sensor_id",
+            ):
+                if zone.get(key):
+                    self.assertEqual(str(zone[key]["device_id"]), expected)
+            for diagnostic in zone.get("diagnostics", {}).values():
+                self.assertEqual(str(diagnostic["device_id"]), expected)
         self.assertIn("set_step(5", CORE.cpp_main_section)
         self.assertIn("->set_airflow_weight(1, 2", CORE.cpp_main_section)
-        self.assertEqual(hub["zones"][0]["climate"]["name"], "Living Room")
-        self.assertEqual(hub["zones"][2]["climate"]["name"], "Study")
-        self.assertEqual(hub["zones"][3]["cover"]["name"], "Garage")
+        self.assertEqual(hub["zones"][0]["climate"]["name"], "Climate")
+        self.assertEqual(hub["zones"][2]["climate"]["name"], "Climate")
+        self.assertEqual(hub["zones"][3]["cover"]["name"], "Damper")
+
+    def test_power_feedback_uses_an_existing_sensor(self):
+        config = self.valid(
+            BASE
+            + """
+sensor:
+  - platform: template
+    id: ac_power
+myair:
+  power_feedback:
+    sensor: ac_power
+    idle_below: 50 W
+"""
+        )
+        generate_cpp_contents(config)
+        feedback = config["myair"]["power_feedback"]
+        self.assertEqual(feedback["settle_time"].total_milliseconds, 5000)
+        self.assertEqual(feedback["timeout"].total_milliseconds, 30000)
+        self.assertIn("->set_power_feedback(ac_power, 50.0f, 5000, 30000)", CORE.cpp_main_section)
+        self.assertEqual(
+            config["myair"]["diagnostics"]["activity_feedback"]["name"], "Activity Feedback"
+        )
+
+    def test_power_feedback_rejects_invalid_thresholds_and_timing(self):
+        for settings in (
+            "idle_below: 0 W",
+            "idle_below: -1 W",
+            "idle_below: .nan",
+            "idle_below: .inf",
+            "settle_time: 5s",
+            "idle_below: 50 W\n    settle_time: 0s",
+            "idle_below: 50 W\n    timeout: 5s",
+        ):
+            with self.subTest(settings=settings):
+                config = self.load(
+                    BASE
+                    + """
+sensor:
+  - platform: template
+    id: ac_power
+myair:
+  power_feedback:
+    sensor: ac_power
+    """
+                    + settings
+                    + "\n"
+                )
+                self.assertTrue(config.errors)
 
 
 if __name__ == "__main__":

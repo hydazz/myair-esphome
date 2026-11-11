@@ -1,6 +1,7 @@
 #pragma once
 
 #include "protocol.h"
+#include "state.h"
 
 namespace esphome::myair {
 
@@ -32,6 +33,8 @@ class Session {
   std::string receive(uint8_t byte, uint32_t now);
   void tick(uint32_t now);
   const RegisterBank &bank() const { return bank_; }
+  std::optional<EquipmentState> equipment() const;
+  bool zone_open(uint8_t zone) const;
   bool ready() const { return ready_; }
   uint32_t revision() const { return revision_; }
   uint32_t generation() const { return generation_; }
@@ -78,7 +81,6 @@ class Session {
   std::string discarded_writes_;
   std::vector<Change> writes_;
   std::vector<Change> active_;
-  std::vector<Record> readback_;
   uint32_t write_started_{};
   bool readback_requested_{};
   std::vector<SensorBinding> sensors_;

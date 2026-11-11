@@ -1,7 +1,9 @@
+import math
 import re
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.components import (
     binary_sensor,
     button,
@@ -30,7 +32,8 @@ from esphome.const import (
     UNIT_CELSIUS,
     UNIT_PERCENT,
 )
-from esphome.core import CORE, AutoLoad
+from esphome.core import AutoLoad
+from esphome.core.config import DEVICE_SCHEMA, FRIENDLY_NAME_MAX_LEN, validate_ids_and_references
 
 DOMAIN = "myair"
 DEPENDENCIES = ["uart"]
@@ -62,10 +65,9 @@ SensorType = myair_ns.enum("SensorType", is_class=True)
 NumberType = myair_ns.enum("NumberType", is_class=True)
 TextSensorType = myair_ns.enum("TextSensorType", is_class=True)
 
-# An empty name lets a climate take its device's name.
 ZONE_ENTITY_NAMES = {
-    "climate": "",
-    "cover": "",
+    "climate": "Climate",
+    "cover": "Damper",
     "temperature": "Temperature",
     "damper": "Damper",
     "min_damper": "Minimum Damper",
@@ -88,7 +90,7 @@ SENSOR_ENTITIES = (
 )
 
 
-def entity_names(config, names, defaults, prefix="", extra=None):
+def entity_names(config, names, defaults):
     config = config.copy()
     for key, name in names.items():
         if key not in config and key not in defaults:
@@ -99,7 +101,7 @@ def entity_names(config, names, defaults, prefix="", extra=None):
         if isinstance(entity, str):
             entity = {CONF_NAME: entity}
         if isinstance(entity, dict):
-            entity = {CONF_NAME: f"{prefix}{name}".strip(), **(extra or {}), **entity}
+            entity = {CONF_NAME: name, **entity}
         config[key] = entity
     return config
 
@@ -114,13 +116,19 @@ def zone_defaults(config):
     if not isinstance(config, dict):
         return config
     defaults = ZONE_DEFAULTS if config.get("sensor", True) is not False else AIRFLOW_ZONE_DEFAULTS
-    if CONF_DEVICE_ID in config:
-        return entity_names(
-            config, ZONE_ENTITY_NAMES, defaults, extra={CONF_DEVICE_ID: config[CONF_DEVICE_ID]}
-        )
-    config = config.copy()
+    config = entity_names(config, ZONE_ENTITY_NAMES, defaults)
+    if "zone" in config:
+        with cv.prepend_path(["zone"]):
+            config["zone"] = cv.int_(config["zone"])
     config.setdefault(CONF_NAME, f"Zone {config.get('zone', '')}")
-    return entity_names(config, ZONE_ENTITY_NAMES, defaults, prefix=f"{config[CONF_NAME]} ")
+    for key in ZONE_ENTITY_NAMES:
+        if isinstance(entity := config.get(key), dict):
+            if CONF_DEVICE_ID in entity:
+                raise cv.Invalid(
+                    "Zone entities belong to their zone device", path=[key, CONF_DEVICE_ID]
+                )
+            entity[CONF_DEVICE_ID] = f"myair_zone_{config.get('zone', '')}"
+    return config
 
 
 def zone_kind(config):
@@ -161,6 +169,7 @@ SYSTEM_DIAGNOSTICS = {
     "ac_mode": ("AC Mode", DIAGNOSTIC_TEXT),
     "ac_fan": ("AC Fan", DIAGNOSTIC_TEXT),
     "ac_error": ("AC Error", DIAGNOSTIC_TEXT),
+    "activity_feedback": ("Activity Feedback", DIAGNOSTIC_TEXT),
     "connected": (
         "Connected",
         binary_sensor.binary_sensor_schema(
@@ -186,16 +195,9 @@ PROBE_DIAGNOSTICS = {
 
 
 def diagnostics(definitions, zone=None):
-    prefix = ""
-    device = {}
-    if zone is not None:
-        if CONF_DEVICE_ID in zone:
-            device[CONF_DEVICE_ID] = zone[CONF_DEVICE_ID]
-        else:
-            prefix = f"{zone[CONF_NAME]} "
+    device = {CONF_DEVICE_ID: f"myair_zone_{zone['zone']}"} if zone is not None else {}
     return AutoLoad(
-        (key, schema({CONF_NAME: prefix + name, **device}))
-        for key, (name, schema) in definitions.items()
+        (key, schema({CONF_NAME: name, **device})) for key, (name, schema) in definitions.items()
     )
 
 
@@ -213,8 +215,9 @@ ZONE_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(Zone),
             cv.Required("zone"): cv.int_range(min=1, max=10),
-            cv.Optional(CONF_NAME): cv.All(cv.string_strict, cv.Length(min=1)),
-            cv.Optional(CONF_DEVICE_ID): cv.sub_device_id,
+            cv.Optional(CONF_NAME): cv.All(
+                cv.string_no_slash, cv.Length(min=1), cv.ByteLength(max=FRIENDLY_NAME_MAX_LEN)
+            ),
             cv.Optional("sensor", default=True): cv.boolean,
             cv.Optional("sensor_uid"): sensor_uid,
             cv.Optional("airflow_weight"): cv.float_range(min=0, min_included=False, max=100),
@@ -298,6 +301,46 @@ def add_diagnostics(config):
     return config
 
 
+def add_devices(config):
+    for zone in config["zones"]:
+        zone["device"] = AutoLoad(
+            DEVICE_SCHEMA({CONF_ID: f"myair_zone_{zone['zone']}", CONF_NAME: zone[CONF_NAME]})
+        )
+    return config
+
+
+def register_devices(config):
+    # Core codegen owns device registration and the size of its static device array.
+    core = fv.full_config.get()[CONF_ESPHOME]
+    core[CONF_DEVICES].extend(zone["device"] for zone in config["zones"])
+    validate_ids_and_references(core)
+    return config
+
+
+def validate_power_feedback(config):
+    threshold = config["idle_below"]
+    if not math.isfinite(threshold) or threshold <= 0:
+        raise cv.Invalid("idle_below must be finite and positive")
+    if config["settle_time"].total_milliseconds <= 0:
+        raise cv.Invalid("settle_time must be positive")
+    if config["timeout"].total_milliseconds <= config["settle_time"].total_milliseconds:
+        raise cv.Invalid("timeout must exceed settle_time")
+    return config
+
+
+POWER_FEEDBACK_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required("sensor"): cv.use_id(sensor.Sensor),
+            cv.Required("idle_below"): cv.float_with_unit("power", "(W|w)?"),
+            cv.Optional("settle_time", default="5s"): cv.positive_time_period_milliseconds,
+            cv.Optional("timeout", default="30s"): cv.positive_time_period_milliseconds,
+        }
+    ),
+    validate_power_feedback,
+)
+
+
 CONFIG_SCHEMA = cv.All(
     system_defaults,
     cv.Schema(
@@ -307,32 +350,28 @@ CONFIG_SCHEMA = cv.All(
                 climate.climate_schema(SystemClimate).extend(cv.COMPONENT_SCHEMA)
             ),
             cv.Optional("zones", default=[]): cv.ensure_list(ZONE_SCHEMA),
+            cv.Optional("power_feedback"): POWER_FEEDBACK_SCHEMA,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(uart.UART_DEVICE_SCHEMA),
     validate_zones,
+    add_devices,
     add_diagnostics,
 )
 
-FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
-    DOMAIN,
-    baud_rate=57600,
-    require_rx=True,
-    require_tx=True,
-    data_bits=8,
-    parity="NONE",
-    stop_bits=1,
+FINAL_VALIDATE_SCHEMA = cv.All(
+    uart.final_validate_device_schema(
+        DOMAIN,
+        baud_rate=57600,
+        require_rx=True,
+        require_tx=True,
+        data_bits=8,
+        parity="NONE",
+        stop_bits=1,
+    ),
+    register_devices,
 )
-
-
-def zone_name(config):
-    if CONF_NAME in config:
-        return config[CONF_NAME]
-    for device in CORE.config[CONF_ESPHOME][CONF_DEVICES]:
-        if device[CONF_ID].id == config[CONF_DEVICE_ID].id:
-            return device[CONF_NAME]
-    return f"Zone {config['zone']}"
 
 
 async def to_code(config):
@@ -340,10 +379,21 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
+    if feedback := config.get("power_feedback"):
+        source = await cg.get_variable(feedback["sensor"])
+        cg.add(
+            var.set_power_feedback(
+                source,
+                feedback["idle_below"],
+                feedback["settle_time"],
+                feedback["timeout"],
+            )
+        )
+
     if config.get("climate"):
         entity = await climate.new_climate(config["climate"], var)
         await cg.register_component(entity, config["climate"])
-    for key in ("reference_zone", "ac_mode", "ac_fan", "ac_error"):
+    for key in ("reference_zone", "ac_mode", "ac_fan", "ac_error", "activity_feedback"):
         await text_sensor.new_text_sensor(
             config["diagnostics"][key], var, getattr(TextSensorType, key.upper())
         )
@@ -353,7 +403,7 @@ async def to_code(config):
     for zone_config in config["zones"]:
         number_ = zone_config["zone"]
         zone = cg.new_Pvariable(
-            zone_config[CONF_ID], var, number_, zone_name(zone_config), zone_config["sensor"]
+            zone_config[CONF_ID], var, number_, zone_config[CONF_NAME], zone_config["sensor"]
         )
         if "sensor_uid" in zone_config:
             cg.add(var.set_sensor(number_, int(zone_config["sensor_uid"], 16)))

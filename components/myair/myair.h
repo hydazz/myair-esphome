@@ -1,6 +1,8 @@
 #pragma once
 
+#include "activity.h"
 #include "controller.h"
+#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
@@ -44,6 +46,9 @@ class MyAir : public Component, public uart::UARTDevice {
   // The holds, for a simulator that runs house time faster.
   Tuning &tuning() { return controller_.tuning; }
   const Session &session() const { return session_; }
+  std::optional<Action> activity() const { return activity_.system(session_.equipment()); }
+  Feedback feedback() const { return activity_.feedback(); }
+  void set_power_feedback(sensor::Sensor *sensor, float idle_below, uint32_t settle_time, uint32_t timeout);
   void set_mode(Mode mode);
   void set_fan(Fan fan);
   bool set_room(uint8_t zone, const Room &room);
@@ -72,6 +77,7 @@ class MyAir : public Component, public uart::UARTDevice {
   Zone *zone_(uint8_t number) const;
   Session session_;
   Controller controller_;
+  Activity activity_;
   ESPPreferenceObject system_preference_;
   ESPPreferenceObject setpoint_preference_;
   uint32_t revision_{};

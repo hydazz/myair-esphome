@@ -1,24 +1,38 @@
 # myair-esphome
 
-ESPHome component that replaces the MyAir 5 touch screen. The ESP plugs into the control box's touch screen port, the RS-485 bus the zone dampers and sensors hang off, and runs the system: mode, fan, the reference zone and every zone setpoint. Home Assistant gets one climate per room and one for the AC.
+ESPHome component for replacing an Advantage Air MyAir tablet with an ESP32.
 
-The control box keeps its own jobs: the damper loop, the RF temperature sensors and the link to the AC, whose protections stay in charge.
+## Why
 
-## Limitations
+The MyPlace app sucks. The [Advantage Air integration](https://www.home-assistant.io/integrations/advantage_air/) polls the tablet, so changing a zone or mode could take up to 15 seconds to show up without optimistic updates. Annoying, and replacing the tablet with an ESP32 seemed fun.
 
-- It is written for a CB10 control box behind a MyAir 5 touch screen. Other control boxes that speak the same protocol may work; none has been tried.
-- One master on the bus. Unplug the touch screen before the ESP goes on, and never run both.
-- It has run against a simulated control box, not yet a live one. The cable's pinout and voltage are unconfirmed: community sources put RS-485 on pins 1 and 2 and about 14 V on pin 5, and one owner disagrees. Measure first.
-- Untested on hardware: zones without sensors, constant zones, defrost, and what the control box sends the AC with no temperature zone on. The reported heating and cooling damper curves have been observed with the stock controller; the replacement has not run either on hardware.
-- Thresholds and holds are starting values from one house. Airflow weights and damper percentages are estimates, not measured flow or pressure. There is no validated minimum airflow, and the fan ceiling applies only to Fan Auto.
-- The control box repeats cached temperatures between RF reports. In an attic probe battery test, it reported the cached temperature for ten minutes after the last RF report, then marked the sensor absent. The ESP ignores the temperature once the box marks the sensor absent.
-- Motion sensors aren't read; presence belongs to Home Assistant.
+ESPHome gives me declarative controls and pushes state updates as they arrive from the control box. The ESP runs the room controls; the box still handles the dampers and talks to the AC.
 
-## Hardware
+## 🔌 Hardware
 
-Any ESPHome board with a hardware UART and a 3.3 V RS-485 transceiver. The YAML below is for an ATOMS3 Lite on an A131 Atomic RS485 base, which switches direction itself. The bus runs at 57600 baud, 8N1.
+An ESP32 with a hardware UART and a 3.3 V RS-485 transceiver. I'm using an ATOMS3 Lite with an A131 Atomic RS485 base, connected to the CB10's touchscreen port. The A131 switches direction automatically.
 
-## Configuration
+<p>
+  <img src="docs/images/cb10.jpeg" alt="cb10" height="320">
+  <img src="docs/images/rs485.jpeg" alt="rs485" height="320">
+</p>
+
+The touchscreen connection uses RS-485 at 57600 baud, 8N1:
+
+| RJ45 pin | A131 |
+| -------- | ---- |
+| 1        | A    |
+| 2        | B    |
+| 4        | GND  |
+| 5        | 24 V |
+
+Pin 5 powers the Atom through the A131. Verify 24 V between pins 5 and 4 before connecting it.
+
+Only one controller can drive the bus.
+
+## ⚙️ Configuration
+
+Add to an ESPHome device config. These UART pins are for the ATOMS3 Lite and A131:
 
 ```yaml
 external_components:
@@ -37,7 +51,7 @@ myair:
   zones:
     - zone: 1
       name: Living Room
-      sensor_uid: "011210"
+      sensor_uid: "01186E"
       airflow_weight: 2
 
     - zone: 7
@@ -48,113 +62,114 @@ myair:
       sensor: false
 ```
 
-Each zone takes:
+| Key              | Default  | Use                                                         |
+| ---------------- | -------- | ----------------------------------------------------------- |
+| `zone`           | Required | Physical output on the control box, 1–10                    |
+| `name`           | `Zone n` | Room device name                                            |
+| `sensor`         | `true`   | `false` gives manual damper control instead of a thermostat |
+| `sensor_uid`     | Optional | Probe UID: six hex digits, quoted                           |
+| `airflow_weight` | `1`      | Relative airflow with the damper fully open                 |
 
-- **zone** (required, 1–10): the control box's physical output. The ESP controls every listed zone and leaves an unlisted one as the control box has it.
-- **name** (optional): defaults to the zone's device name, or Zone _n_.
-- **device_id** (optional): an ESPHome sub-device for the zone; see below.
-- **sensor** (optional, default true): `false` makes an airflow zone, set to a damper position in 5 % steps, as the touch screen does. A zone with a sensor is a room with a range.
-- **sensor_uid** (optional, six hex digits, quoted): the RF sensor to assign.
-- **airflow_weight** (optional, default 1): an estimate of the zone's airflow with its damper fully open, relative to the other zones'. It weighs the zone in Fan Auto, in Auto's choice of side and in whether the zone can carry the AC. Duct cross-section is a starting estimate: two independent feeds the size of another zone's one give 2; two outlets split from one feed still share that feed. A 6" duct has about half an 8" duct's area. Leave the installer's balancing out: the ESP reads each zone's maximum damper and scales the weight by it. This linear approximation does not account for duct resistance or measure room heat load. Room area or volume is not an airflow measurement.
-- Entity keys, below.
+List every zone you want the ESP to manage, including any installer-configured constant zones. Unlisted zones are left alone.
 
-### A device per room
+Each room gets its own device. Temperature zones have a climate, temperature and damper sensor; zones without probes have a damper cover with 5% steps. Device identity follows the physical zone number, so names and YAML order can change.
 
-A zone can be its own ESPHome sub-device, which Home Assistant shows as a device in that room's area. The zone then takes its name from the device:
+`airflow_weight` is a rough duct-size estimate. Two independent feeds the size of another room's one give `2`; two outlets split from one feed still share it. A 6-inch duct has about half an 8-inch duct's area. The component applies the box's maximum damper setting separately, so leave balancing out of the weight. These estimates guide reference selection and Auto fan; they don't measure airflow or pressure.
+
+### Optional entities
+
+Zone entity keys accept a name, an ESPHome options mapping, or `false` to omit the entity. Use `{}` to enable an optional entity with its default name. For example:
 
 ```yaml
-esphome:
-  name: myair
-  areas:
-    - id: living_room
-      name: Living Room
-  devices:
-    - id: living_room_zone
-      name: Living Room Zone
-      area_id: living_room
-
-myair:
-  uart_id: cb_uart
-  zones:
-    - zone: 1
-      device_id: living_room_zone
+- zone: 1
+  name: Living Room
+  temperature_offset: {}
+  pair_sensor: {}
+  unpair_sensor: {}
+  sensor_id: {}
 ```
 
-## Entities
+| Key                  | Entity      | Created by default         |
+| -------------------- | ----------- | -------------------------- |
+| `climate`            | Climate     | Temperature zones          |
+| `cover`              | Cover       | Zones without probes       |
+| `temperature`        | Sensor      | Temperature zones          |
+| `damper`             | Sensor      | Temperature zones          |
+| `min_damper`         | Number      | No                         |
+| `max_damper`         | Number      | No                         |
+| `temperature_offset` | Number      | No; temperature zones only |
+| `pair_sensor`        | Switch      | No; temperature zones only |
+| `unpair_sensor`      | Button      | No; temperature zones only |
+| `sensor_id`          | Text sensor | No; temperature zones only |
 
-The main device has a climate for mode, fan and targets. Home Assistant also gets **Reference Zone**, **AC Mode**, **AC Fan**, **AC Error** and **Connected**. The climate shows the selected mode and fan. With both set to Auto, the control box might report Cool and Low.
+`min_damper` and `max_damper` change the installer's balancing limits in 5% steps. `temperature_offset` calibrates the room by −5 to +5 °C and adjusts the setpoint sent to the box. A filter on the temperature entity only changes its published reading.
 
-Each temperature zone gets a **Low Battery** diagnostic. Home Assistant starts the less-used diagnostics disabled: **Sensor Error Flags** and **Sensor Report Counter** per temperature zone, and **Unconfirmed Write Batches** on the main device. Enable any of them on the device's entity page. The write counter counts resyncs that discarded pending writes during this boot. The ESP log identifies the affected writes.
+Hiding an entity leaves the zone under control. The main climate can also be customised through `myair.climate`.
 
-The following zone entities accept ESPHome options in YAML:
+## Control
 
-| Key                  | Entity      | Temperature zone | Airflow zone |
-| -------------------- | ----------- | ---------------- | ------------ |
-| `climate`            | Climate     | yes              | –            |
-| `cover`              | Cover       | –                | yes          |
-| `temperature`        | Sensor      | yes              | –            |
-| `damper`             | Sensor      | yes              | no           |
-| `min_damper`         | Number      | no               | no           |
-| `max_damper`         | Number      | no               | no           |
-| `temperature_offset` | Number      | no               | –            |
-| `pair_sensor`        | Switch      | no               | –            |
-| `unpair_sensor`      | Button      | no               | –            |
-| `sensor_id`          | Text sensor | no               | –            |
+The main climate sets mode and fan speed. Each room has a heat-to/cool-to range, in whole degrees with at least 2 °C between them. Main target changes apply to every temperature room, including rooms that are off; rooms can then be adjusted individually. Changing mode preserves those ranges.
 
-Yes is created by default, no on request, – not at all. Set an entity to a name, a mapping of its ESPHome options, `{}` for an optional entity with its default name, or `false` to omit it. Mappings accept the usual options for the domain, such as `id`, `filters`, `icon` and `visual`. Omitting an entity doesn't change what the ESP controls: the zone keeps its saved state.
+The AC regulates against one **reference zone**, whose damper stays at its maximum. The ESP picks the room furthest past its target. Once that room is satisfied, it can move the reference to another room still needing air, with 10 minutes between moves. Turning the reference room off triggers a handover immediately. Other rooms use the box's proportional damper loop; the ESP can trim their setpoints by 1 °C to help rooms falling behind.
 
-- **Cover:** an airflow zone's damper. Open turns the zone on at its last position, a position sets it in 5 % steps, and closed turns it off.
-- **Damper:** the position the control box's loop sets, as a share of the zone's range: 5 % at or inside its setpoint, 30 % plus 70 % per °C past it in 5 % steps, 100 % from 1 °C past and for the reference zone. A closed zone reads 0. It is a commanded position, not measured airflow.
-- **Minimum Damper** and **Maximum Damper:** the control box's balancing limits in 5 % steps, the settings on the touch screen's technician balancing page. They are optional because they rewrite the installer's balancing.
-- **Temperature Offset:** calibrates a zone's sensor between −5 and +5 °C. The ESP subtracts it from the setpoint it sends, so the room still targets its range.
+In **Auto**, room demand decides heating or cooling. Changeover needs 15 minutes without demand on the current side and a room at least 1 °C past the opposite target. **Auto fan** follows demand and estimated open airflow, stepping up at most every 10 minutes and down every 20. It drops sooner if too few dampers are open. Manually selected fan speeds stay put.
 
-## How the ESP runs the AC
+Heavily throttled rooms, at or below 15% of the largest zone's estimated airflow, can't become the reference or run the AC alone. They get air while another zone runs it. Constant zones open as needed to make up the box's minimum total damper opening. The thresholds are starting values from my house; [controller.cpp](components/myair/controller.cpp) has the details.
 
-The AC's climate sets the mode (Off, Auto, which Home Assistant shows as Heat/Cool, Cool, Heat, Fan only, Dry) and fan (Auto, Low, Medium, High). With temperature rooms configured, it shows a heat-to/cool-to range in Auto, the heating target in Heat, and the cooling target in Cool. These are the reference room's targets, or the first configured room's before a reference is selected. Its current temperature is the reference room's temperature.
+Turning the last eligible room or airflow zone off requests AC Off. Shutdown leaves the dampers and reference alone because the indoor fan may still be running. With only airflow zones on, the AC uses its own thermostat and saved setpoint; Auto becomes the AC's native Auto mode.
 
-Changing a main target applies that edge to every temperature room, including rooms that are off. Setting a main range applies both edges. This is a one-time edit: a subsequent room edit stays in that room, and switching modes does not reset it. Room on/off states and airflow zones are unchanged. Each room keeps its range at least 2 °C wide. Ranges can be prepared while the AC is off; Fan only and Dry have no temperature dial in Home Assistant.
+First boot starts with the AC and all configured zones off. Balancing limits and constant-zone assignments stay in the control box.
 
-Without any temperature rooms configured, the main climate keeps a single target for the AC's own thermostat. While airflow zones run without an eligible temperature room, the AC uses that saved single target and its own Auto mode; room ranges cannot regulate return air whose temperature is absent from the bus.
+Cooling, zone control and reference changes are running here. Heating, sensorless zones, constant zones and defrost still need testing with the tablet removed.
 
-A room's climate is Off or Heat/Cool, with a heat-to and a cool-to temperature in whole degrees, at least 2 °C apart. Set one edge closer and the other moves away; at 16 or 32 °C, the edge you set gives way instead. The gap puts Auto's changeover points 4 °C apart, so Auto doesn't swing between heating and cooling. Home Assistant turns rooms on and off and moves their ranges; the ESP turns that into control box settings. A room calls once it is more than 0.5 °C past the edge for the current side.
+### Power feedback
 
-Mode and room targets are sent together without cycling power. Their readback is published together, so climate actions never combine the old mode with new targets. An idle system stays idle across Heat/Cool changes when neither side needs conditioning. Climate actions are estimates from the control box's mode, temperatures and setpoints; the bus does not report compressor activity.
+No compressor status flag has been identified on the bus. Without a power meter, the climate action follows the confirmed AC mode. An enabled system can therefore show Cooling while the compressor is idle.
 
-- **Rooms.** While the AC runs, an on room's zone is open and gets its cool-to (cooling, drying) or heat-to (heating) as its zone setpoint, and the control box modulates its damper against it. An off room's zone closes once it is no longer the reference.
-- **Airflow zones** hold their requested damper position while the AC runs.
-- **Power follows the zones.** The AC runs while the mode isn't Off and a room that can carry it with a readable temperature, or an airflow zone, is on. Turning the last one off requests AC Off. Shutdown leaves the reference and all damper commands untouched, including constant zones: a power-off report does not prove the indoor fan has stopped. Room and airflow requests are saved while off and applied at the next start. An invalid temperature disqualifies a room as the reference; if no eligible room or airflow zone remains, the AC stops.
-- **Reference zone.** The AC regulates on one zone and backs off once that room is satisfied, and the control box holds that zone's damper at its maximum. The ESP starts it in the open room furthest past its edge, the larger airflow on a tie. Once the reference room is satisfied and another room is more than 0.3 °C past its edge, the reference moves to the room furthest past its edge, at most every 10 minutes, so the AC keeps working for the rooms that need it. It moves at once if the reference room turns off. When the AC stops, the reference stays where it was, so that zone stays open.
-- **Small rooms.** A zone with at most 15 % of the largest zone's airflow at its maximum damper, one the installer throttled down, can't carry the AC. It never takes the reference, runs the AC on its own or chooses Auto's side; it gets air while a larger room runs the AC.
-- **Trims.** The control box's damper loop is proportional, so a room with more load than its share of air settles past its edge with its damper part open. While another open room is more than 0.3 °C past its edge, the ESP sets its zone setpoint 1 °C past the edge, so its damper opens fully sooner, and takes the trim off once the room is 0.2 °C back inside. A trim changes at most every 10 minutes.
-- **Auto** cools or heats. It starts on the side the AC is running while a room calls on it or no room is 1 °C past its other edge, and otherwise on the side with more demand weighted by each room's airflow. It changes side only after no room has called on the current side for 15 minutes and a room is 1 °C past its other edge.
-- **Fan Auto** follows the airflow the open zones ask for: each room's airflow at its maximum damper, scaled by how far it is past its edge up to 2 °C, and each airflow zone's at its position. Medium starts at 20 % of the system's airflow and high at 40 %, and they hold down to 10 % and 30 %. The control box opens a damper fully at 1 °C past, and beyond that only more air helps, so a candidate for the reference also asks for medium on its own at 1.2 °C past its edge and high at 2.2 °C, holding them down to 0.8 and 1.8 °C. The fan moves one speed at a time, up at most every 10 minutes and down every 20.
-- **The fan's ceiling.** Fan Auto caps its requested speed using the damper positions this batch leaves open: medium needs 10 % of the system's estimated airflow open and high 40 %, and staying on a speed needs three quarters of that. Below that the next fan write drops without a hold. These are starting thresholds, not measured airflow or a guarantee of acceptable duct pressure. A fan speed set by hand stands.
-- **The AC's own setpoint.** The ESP writes the reference room's edge as the AC's own setpoint too, for a control box wired to send the AC return air. With no temperature zone on, it writes reference 0 and the AC's own setpoint, the AC's last target, and Auto becomes the AC's own auto. The control box's installation manual has DIP switch 5 select a return-air sensor.
-- **Constant zones.** An installer's constant zones, listed in the control box, open while the other open zones' damper positions add up to less than 100 % per constant zone, as the touch screen does. List a constant zone for the ESP to manage it.
+An optional sensor in watts adds Idle detection:
+
+```yaml
+myair:
+  uart_id: cb_uart
+  power_feedback:
+    sensor: ac_power
+    idle_below: 50 W
+    settle_time: 5s
+    timeout: 60s
+  # zones: ...
+```
+
+Choose `idle_below` above your standby draw. Fresh samples must stay on the new side of the threshold for `settle_time` before the action changes. The defaults are 5 seconds to settle and 30 seconds before readings expire. Missing, invalid or stale feedback falls back to the confirmed mode. This only affects reporting.
+
+Importing the power entity from Home Assistant left unchanged readings going stale, with no way to tell whether the meter was still reporting. Feed meter responses directly over MQTT into `ac_power`, including unchanged values. Each actual response refreshes its age; an ESPHome heartbeat filter doesn't. The input uses raw sensor values, before filters.
+
+Room actions follow the system action and damper position. In heating or cooling, the box's 5% idle position reports Idle; an open reference room can still show Heating or Cooling after reaching its target. Damper position is a command, not measured heat delivery.
 
 ## Temperature sensors
 
-Each assigned probe has an eight-bit report counter. **Sensor Report Counter** shows its last received value in this connection. The counter can change while the temperature stays constant and wraps from 255 to 0. It is unknown until the ESP receives a report for the zone's configured or paired UID.
+<img src="docs/images/temperature-sensor.jpeg" alt="temperature-sensor" width="320">
 
-**Sensor Error Flags** shows the control box's zone flags. The values add together. Bit values 1 and 4 indicate temperature and motion sensor clashes respectively. Value 2 is the tablet's “Check Battery” warning. The attic probe also raised it after its battery was removed. Zero means the box has set no flags.
+Set `sensor_uid` to the ID marked in red. If the sticker is missing, enable `pair_sensor` and `sensor_id` on the zone to read it through pairing:
 
-Each temperature zone shows **Low Battery** in Home Assistant. It follows the control box's “Check Battery” flag and reads unknown while the control box is disconnected.
+1. Turn on **Pair Sensor**.
+2. Hold the probe's button until the LED flashes.
+3. **Sensor UID** shows the assignment when the box receives the probe.
 
-The sensor UID is printed inside the case, beside the QR code. Set `sensor_uid` on the zone to assign it, quoted.
+Pairing stops on success, failure or after 60 seconds. Pairing a probe to another zone moves it; **Unpair Sensor** removes it. Saved pairing takes precedence over YAML and is sent to the box on reconnect.
 
-To pair from Home Assistant, enable `pair_sensor`, `unpair_sensor` and `sensor_id` on the zone, then:
+The box repeats cached temperatures between RF reports. After removing a probe battery, it kept the last reading for about 10 minutes before marking the sensor absent. The component then discards that temperature. **Sensor Report Counter** exposes the probe's 8-bit counter: it advances even if temperature hasn't changed and wraps at 255.
 
-1. Turn on the zone's **Pair Sensor** switch.
-2. Hold the button inside the probe for six seconds and release it. Its LED flashes.
-3. **Sensor UID** shows the UID once the control box receives the probe.
+**Low Battery** follows the box's “Check Battery” flag, which can also mean a missing probe. **Sensor Error Flags** is a bitmask: `1` for a temperature sensor clash, `2` for Check Battery, `4` for a motion sensor clash.
 
-Pairing stops on success, failure or after 60 seconds. **Unpair Sensor** removes the assignment, and pairing a probe to another zone moves it. Pairing and unpairing save the assignment on the ESP, which then takes precedence over `sensor_uid`. Assignments go to the control box on every reconnect.
+## Diagnostics
 
-## What the ESP saves
+**Reference Zone**, **AC Mode** and **AC Fan** show what the box reports. The climate retains the requested mode and fan, so Auto can appear alongside Cool and Low. **AC Error** exposes equipment errors; **Activity Feedback** shows whether power readings are in use, waiting, unavailable or stale.
 
-On change, to flash: the mode and fan, the AC's own setpoint, each room's on state and range, each airflow zone's on state and position, sensor offsets and the sensor assignments pairing makes. On first boot every zone is off and the mode is Off. Damper limits and constant zones live in the control box.
+**Connected** tracks communication with the box. Check it if climate values look stuck: Home Assistant 2026.11.1 retains climate values when ESPHome marks their state missing.
 
-## Development
+**Sensor Error Flags**, **Sensor Report Counter** and **Unconfirmed Write Batches** are disabled by default in Home Assistant. The write counter counts resyncs that discarded pending writes this boot; the ESP log lists those writes.
+
+## 🧑‍💻 Development
 
 ```sh
 mise install
@@ -165,5 +180,12 @@ mise run test
 mise run build
 ```
 
-Protocol references: [cb-daemon](https://github.com/retsimx/cb-daemon) and
-[aa_interop](https://github.com/gundy/aa_interop).
+[tests/firmware.yaml](tests/firmware.yaml) is the build config. Host tests cover the protocol and controller without hardware.
+
+## 📄 License
+
+Licensed under the [Apache License 2.0](LICENSE).
+
+## 🙏 Acknowledgments
+
+- [cb-daemon](https://github.com/retsimx/cb-daemon) and [aa_interop](https://github.com/gundy/aa_interop) for the protocol work.

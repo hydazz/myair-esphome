@@ -453,6 +453,7 @@ static void test_pairing_cancellation() {
 }
 
 void test_controls();
+void test_activity();
 
 int main() {
   test_frames();
@@ -471,5 +472,6 @@ int main() {
   test_control_box_pairing_reply();
   test_pairing_cancellation();
   test_controls();
+  test_activity();
   std::cout << "All tests passed\n";
 }

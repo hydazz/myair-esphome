@@ -1,7 +1,14 @@
 #include <algorithm>
 #include <cmath>
 
+#include "activity.h"
 #include "test_support.h"
+
+static std::optional<Action> system_action(const Bus &bus) { return Activity{}.system(bus.session.equipment()); }
+
+static std::optional<Action> zone_action(const Bus &bus, const Controller &controller, uint8_t zone) {
+  return Activity::zone(Activity{}.system(bus.session.equipment()), controller.room(zone)->on, controller.damper(zone));
+}
 
 static void ready(Bus &bus, uint8_t count = 3) {
   start(bus);
@@ -321,7 +328,7 @@ static void test_last_room_off_stops_the_ac() {
   CHECK(writes.size() == 1);
   CHECK(writes[0].kind == 5 && writes[0].data[0] == 0 && writes[0].data[4] == 1);
   CHECK(bus.session.bank().find(3, 1)->data[1] & 0x80);
-  CHECK(controller.action(1) == Action::OFF);
+  CHECK(zone_action(bus, controller, 1) == Action::OFF);
 }
 
 static void test_setpoints_follow_mode_and_offset() {
@@ -356,7 +363,7 @@ static void test_setpoints_follow_mode_and_offset() {
   CHECK(!controller.set_offset(1, 6));
 }
 
-static void test_idle_changeover_stays_idle() {
+static void test_changeover_reports_confirmed_direction() {
   for (const auto initial : {Mode::COOL, Mode::HEAT}) {
     for (const bool reverse : {false, true}) {
       Bus bus;
@@ -378,15 +385,20 @@ static void test_idle_changeover_stays_idle() {
               return record.kind == kind::SYSTEM && record.data[field::POWER] == 1;
             }) == 1);
       if (reverse) std::reverse(writes.begin(), writes.end());
+      Mode confirmed = initial;
       for (size_t i = 0; i <= writes.size(); i++) {
-        if (i > 0) apply(bus, writes[i - 1]);
+        if (i > 0) {
+          apply(bus, writes[i - 1]);
+          if (writes[i - 1].kind == kind::SYSTEM) confirmed = mode;
+        }
+        const auto action = confirmed == Mode::HEAT ? Action::HEATING : Action::COOLING;
         controller.step(bus.now);
         CHECK(controller.mode() == mode);
-        CHECK(controller.ac_action() == Action::IDLE);
-        CHECK(controller.ac_mode() == (i == writes.size() ? mode : initial));
-        CHECK(controller.ac_fan() == Fan::LOW);
+        CHECK(system_action(bus) == action);
+        CHECK(bus.session.equipment()->mode == confirmed);
+        CHECK(bus.session.equipment()->fan == Fan::LOW);
         for (uint8_t zone = 1; zone <= 3; zone++) {
-          CHECK(controller.action(zone) == Action::IDLE);
+          CHECK(zone_action(bus, controller, zone) == action);
           CHECK(controller.room(zone)->on);
         }
       }
@@ -411,11 +423,11 @@ static void test_off_during_changeover_does_not_restart() {
   for (const auto &write : settle(bus, controller)) {
     CHECK(write.kind != kind::SYSTEM || write.data[field::POWER] == 0);
   }
-  CHECK(controller.ac_mode() == Mode::OFF);
-  CHECK(controller.ac_action() == Action::OFF);
+  CHECK(!bus.session.equipment()->enabled);
+  CHECK(system_action(bus) == Action::OFF);
 }
 
-static void test_changeover_with_demand_becomes_active() {
+static void test_action_follows_mode_readback() {
   for (const bool heating : {false, true}) {
     Bus bus;
     ready(bus, 1);
@@ -424,16 +436,16 @@ static void test_changeover_with_demand_becomes_active() {
     controller.set_room(1, {true, 20, 24});
     set_temperature(bus, 1, heating ? 18 : 26);
     settle(bus, controller);
-    CHECK(controller.ac_action() == Action::IDLE);
+    CHECK(system_action(bus) == (heating ? Action::COOLING : Action::HEATING));
     controller.set_mode(heating ? Mode::HEAT : Mode::COOL);
     controller.step(bus.now);
     const auto writes = next_writes(bus);
     CHECK(writes.size() == 2);
     apply(bus, writes[0]);
-    CHECK(controller.ac_action() == Action::IDLE);
+    CHECK(system_action(bus) == (heating ? Action::COOLING : Action::HEATING));
     apply(bus, writes[1]);
-    CHECK(controller.ac_action() == (heating ? Action::HEATING : Action::COOLING));
-    CHECK(controller.action(1) == controller.ac_action());
+    CHECK(system_action(bus) == (heating ? Action::HEATING : Action::COOLING));
+    CHECK(zone_action(bus, controller, 1) == system_action(bus));
   }
 }
 
@@ -452,17 +464,18 @@ static void test_batch_readback_requires_all_latest_records() {
   bus.receive("getCAN 0 ");
   CHECK(bus.ping() == "ackCAN 1");
   CHECK(bus.ping() == set_can(writes));
+  const auto old_target = *bus.session.bank().find(kind::ZONE, 1);
   apply(bus, writes[0]);
-  CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::SETPOINT] == 48);
+  CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::SETPOINT] == 40);
   // An unrelated temperature remains live while the command is being confirmed.
   set_temperature(bus, 3, 21);
   CHECK(bus.session.bank().find(kind::ZONE, 3)->data[field::WHOLE_DEGREES] == 21);
   // A later stale echo invalidates the earlier match; a transport ACK is not a readback.
-  report(bus, *bus.session.bank().find(kind::ZONE, 1));
+  report(bus, old_target);
   apply(bus, writes[1]);
   bus.receive("getCAN 1 ");
   CHECK(bus.session.writes_pending());
-  CHECK(bus.session.bank().find(kind::SYSTEM)->data[field::MODE] == 1);
+  CHECK(bus.session.bank().find(kind::SYSTEM)->data[field::MODE] == 2);
   apply(bus, writes[0]);
   CHECK(!bus.session.writes_pending());
   CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::SETPOINT] == 40);
@@ -992,10 +1005,10 @@ static void test_airflow_zones_hold_their_position() {
   CHECK(controller.target() == 22);
   CHECK(!(bus.session.bank().find(3, 1)->data[1] & 0x80));
   CHECK(bus.session.bank().find(3, 2)->data[1] == (0x80 | 60));
-  CHECK(controller.ac_action() == Action::IDLE);
+  CHECK(!system_action(bus));
   controller.set_mode(Mode::COOL);
   settle(bus, controller);
-  CHECK(controller.ac_action() == Action::COOLING);
+  CHECK(system_action(bus) == Action::COOLING);
   // The last zone off stops the AC.
   CHECK(controller.set_airflow(2, {false, 60}));
   settle(bus, controller);
@@ -1064,7 +1077,7 @@ static void test_shutdown_preserves_air_paths() {
         CHECK(controller.set_airflow(1, {true, 20}));
       controller.set_mode(Mode::COOL);
       settle(bus, controller);
-      CHECK(controller.ac_mode() == Mode::COOL);
+      CHECK(bus.session.equipment()->mode == Mode::COOL);
       CHECK(bus.session.bank().find(kind::ZONE, 1)->data[field::DAMPER] & field::OPEN);
     }
   }
@@ -1131,7 +1144,7 @@ static void test_three_constant_zones_fill_the_shortfall() {
   CHECK(settle(bus, controller).empty());
 }
 
-static void test_actions() {
+static void test_actions_do_not_follow_room_demand() {
   Bus bus;
   ready(bus, 2);
   Controller controller(bus.session);
@@ -1139,18 +1152,96 @@ static void test_actions() {
   CHECK(controller.set_room(1, {true, 20, 24}));
   CHECK(controller.set_room(2, {true, 20, 25}));
   settle(bus, controller);
-  CHECK(controller.action(1) == Action::COOLING);
-  CHECK(controller.action(2) == Action::IDLE);
-  CHECK(controller.reference() == 1 && controller.setpoint(1) == 24);
-  CHECK(controller.ac_action() == Action::COOLING);
+  CHECK(zone_action(bus, controller, 1) == Action::COOLING);
+  CHECK(zone_action(bus, controller, 2) == Action::COOLING);
+  CHECK(bus.session.equipment()->reference == 1 && controller.setpoint(1) == 24);
+  CHECK(system_action(bus) == Action::COOLING);
   set_temperature(bus, 1, 23.8f);
-  CHECK(controller.ac_action() == Action::IDLE);
+  CHECK(system_action(bus) == Action::COOLING);
+  controller.set_targets(18, 28);
+  controller.set_offset(1, 1);
+  settle(bus, controller);
+  CHECK(system_action(bus) == Action::COOLING);
+  CHECK(zone_action(bus, controller, 2) == Action::COOLING);
+  auto throttled = *bus.session.bank().find(kind::ZONE, 2);
+  throttled.data[field::DAMPER] = field::OPEN | 5;
+  report(bus, throttled);
+  CHECK(bus.session.zone_open(2));
+  CHECK(controller.damper(2) == 5);
+  CHECK(zone_action(bus, controller, 2) == Action::IDLE);
+  CHECK(zone_action(bus, controller, 1) == Action::COOLING);
+  CHECK(system_action(bus) == Action::COOLING);
+  CHECK(settle(bus, controller).empty());
+  throttled.data[field::DAMPER] = field::OPEN | 35;
+  report(bus, throttled);
+  CHECK(zone_action(bus, controller, 2) == Action::COOLING);
   controller.set_mode(Mode::DRY);
   settle(bus, controller);
-  CHECK(controller.action(1) == Action::DRYING);
+  CHECK(zone_action(bus, controller, 1) == Action::DRYING);
   controller.set_mode(Mode::OFF);
   settle(bus, controller);
-  CHECK(controller.action(1) == Action::OFF);
+  CHECK(zone_action(bus, controller, 1) == Action::OFF);
+}
+
+static void test_power_feedback_does_not_change_commands() {
+  std::vector<std::string> baseline;
+  for (int feedback = 0; feedback < 5; feedback++) {
+    Bus bus;
+    ready(bus, 3);
+    Controller controller(bus.session);
+    Activity activity;
+    if (feedback != 0) activity.set_power_config({50, 5000, 30000});
+    controller.set_mode(Mode::AUTO);
+    controller.set_airflow_weight(1, 2);
+    for (uint8_t zone : {1, 2, 3}) controller.set_room(zone, {true, 20, 24});
+    std::vector<std::string> commands;
+    for (unsigned step = 0; step < 60; step++) {
+      if (feedback == 1) activity.update_power(15, bus.now);
+      if (feedback == 2) activity.update_power(1000, bus.now);
+      if (feedback == 3) activity.update_power(NAN, bus.now);
+      if (feedback == 4 && step < 10) activity.update_power(15, bus.now);
+      activity.tick(bus.now);
+      set_temperature(bus, 1, step < 20 ? 27 : 22);
+      set_temperature(bus, 2, step < 30 ? 25 : 17);
+      set_temperature(bus, 3, step < 30 ? 24 : 18);
+      if (step == 20) controller.set_room(1, {false, 20, 24});
+      if (step == 40) controller.set_targets(21, 25);
+      if (step == 59) controller.set_mode(Mode::OFF);
+      for (const auto &write : settle(bus, controller)) commands.push_back(encode_record(write));
+      // The report is consumed independently of the next controller step.
+      const auto state = activity.system(bus.session.equipment());
+      CHECK(state.has_value());
+      wait(bus, controller, 60000);
+    }
+    if (feedback == 0)
+      baseline = commands;
+    else
+      CHECK(commands == baseline);
+  }
+  CHECK(!baseline.empty());
+}
+
+static void test_equipment_keeps_disabled_mode_and_rejects_unknowns() {
+  Bus bus;
+  CHECK(!bus.session.equipment());
+  ready(bus, 1);
+  auto state = *bus.session.bank().find(kind::SYSTEM);
+  state.data[field::POWER] = 0;
+  state.data[field::MODE] = 2;
+  report(bus, state);
+  CHECK(!bus.session.equipment()->enabled);
+  CHECK(bus.session.equipment()->mode == Mode::HEAT);
+  CHECK(system_action(bus) == Action::OFF);
+  state.data[field::POWER] = 1;
+  state.data[field::MODE] = 99;
+  state.data[field::FAN] = 99;
+  report(bus, state);
+  CHECK(!bus.session.equipment()->mode);
+  CHECK(!bus.session.equipment()->fan);
+  CHECK(!system_action(bus));
+  state.data[field::POWER] = 99;
+  report(bus, state);
+  CHECK(!bus.session.equipment());
 }
 
 static void test_reference_requires_a_readable_temperature() {
@@ -1160,21 +1251,21 @@ static void test_reference_requires_a_readable_temperature() {
   controller.set_mode(Mode::COOL);
   for (uint8_t zone : {1, 2}) CHECK(controller.set_room(zone, {true, 20, 24}));
   settle(bus, controller);
-  CHECK(controller.reference() == 1);
+  CHECK(bus.session.equipment()->reference == 1);
   for (uint8_t zone : {1, 2}) {
     auto missing = *bus.session.bank().find(kind::ZONE, zone);
     missing.data[field::WHOLE_DEGREES] = 0xFF;
     report(bus, missing);
     settle(bus, controller);
     if (zone == 1) {
-      CHECK(controller.reference() == 2 && controller.ac_mode() == Mode::COOL);
+      CHECK(bus.session.equipment()->reference == 2 && bus.session.equipment()->mode == Mode::COOL);
     } else {
-      CHECK(controller.ac_mode() == Mode::OFF);
+      CHECK(!bus.session.equipment()->enabled);
     }
   }
   set_temperature(bus, 1, 25);
   settle(bus, controller);
-  CHECK(controller.reference() == 1 && controller.ac_mode() == Mode::COOL);
+  CHECK(bus.session.equipment()->reference == 1 && bus.session.equipment()->mode == Mode::COOL);
 }
 
 static void test_probe_dropout_keeps_its_cached_temperature_bytes() {
@@ -1186,25 +1277,26 @@ static void test_probe_dropout_keeps_its_cached_temperature_bytes() {
   // Attic before and after its probe battery was removed. Only the sensor type changed in the zone record.
   bus.receive("getCAN 1 0703abcde0303e40130170800 0703abcde040300410001003f");
   settle(bus, controller);
-  CHECK(controller.reference() == 3 && controller.temperature(3) == 23.8f);
+  CHECK(bus.session.equipment()->reference == 3 && controller.temperature(3) == 23.8f);
   bus.receive("getCAN 1 0703abcde0303e40030170800 0703abcde040300410001023f");
   settle(bus, controller);
-  CHECK(!std::isfinite(controller.temperature(3)) && controller.ac_mode() == Mode::OFF);
+  CHECK(!std::isfinite(controller.temperature(3)) && !bus.session.equipment()->enabled);
   CHECK(controller.room(3)->on && bus.session.bank().find(kind::LIMITS, 3)->data[field::SENSOR_ERROR] == 2);
   bus.receive("getCAN 1 0703abcde0303a80130180200 0703abcde0403004100010033");
   settle(bus, controller);
-  CHECK(controller.reference() == 3 && controller.ac_mode() == Mode::COOL && controller.temperature(3) == 24.2f);
+  CHECK(bus.session.equipment()->reference == 3 && bus.session.equipment()->mode == Mode::COOL &&
+        controller.temperature(3) == 24.2f);
 }
 
 void test_controls() {
   test_probe_dropout_keeps_its_cached_temperature_bytes();
   test_reference_requires_a_readable_temperature();
   test_three_constant_zones_fill_the_shortfall();
-  test_idle_changeover_stays_idle();
+  test_changeover_reports_confirmed_direction();
   test_batch_readback_requires_all_latest_records();
   test_incomplete_batch_resynchronizes();
   test_off_during_changeover_does_not_restart();
-  test_changeover_with_demand_becomes_active();
+  test_action_follows_mode_readback();
   test_balancing_readback();
   test_write_nack_and_crc_failure();
   test_confirmed_writes();
@@ -1237,5 +1329,7 @@ void test_controls() {
   test_airflow_weights_stand_alone();
   test_constant_zones_hold_up_airflow();
   test_resync_reapplies_rooms();
-  test_actions();
+  test_actions_do_not_follow_room_demand();
+  test_power_feedback_does_not_change_commands();
+  test_equipment_keeps_disabled_mode_and_rejects_unknowns();
 }

@@ -52,11 +52,6 @@ bool Controller::sensor_zone_(uint8_t zone) const {
          state->data[field::SENSOR_TYPE] <= 4;
 }
 
-bool Controller::open_(uint8_t zone) const {
-  const auto *state = session_.bank().find(kind::ZONE, zone);
-  return state != nullptr && (state->data[field::DAMPER] & field::OPEN) != 0;
-}
-
 float Controller::temperature(uint8_t zone) const {
   const auto *state = session_.bank().find(kind::ZONE, zone);
   if (!sensor_zone_(zone) || state->data[field::WHOLE_DEGREES] == 0xFF || state->data[field::TENTHS] > 9) return NAN;
@@ -138,7 +133,7 @@ bool Controller::set_target(float target) {
 }
 
 std::optional<Room> Controller::target_room() const {
-  const uint8_t zone = reference();
+  const uint8_t zone = session_.equipment().value_or(EquipmentState{}).reference;
   if (zone <= 10 && rooms_[zone]) return rooms_[zone];
   for (const auto &room : rooms_) {
     if (room) return room;
@@ -178,7 +173,7 @@ bool Controller::set_targets(std::optional<float> low, std::optional<float> high
 }
 
 float Controller::target() const {
-  const uint8_t zone = reference();
+  const uint8_t zone = session_.equipment().value_or(EquipmentState{}).reference;
   if (!sensor_zone_(zone)) return ac_setpoint_;
   if (!rooms_[zone]) return setpoint(zone);
   const bool heating = mode_ == Mode::HEAT || (mode_ == Mode::AUTO && auto_side_ == Side::HEAT);
@@ -189,10 +184,6 @@ bool Controller::set_airflow_weight(uint8_t zone, float weight) {
   if (zone == 0 || zone > 10 || !(weight > 0) || !std::isfinite(weight)) return false;
   airflow_weights_[zone] = weight;
   return true;
-}
-
-uint8_t Controller::reference() const {
-  return session_.ready() ? session_.bank().find(kind::SYSTEM)->data[field::REFERENCE] : 0;
 }
 
 float Controller::setpoint(uint8_t zone) const {
@@ -206,54 +197,6 @@ float Controller::damper(uint8_t zone) const {
   const uint8_t position = state->data[field::DAMPER] & field::POSITION;
   if (position > 100) return NAN;
   return state->data[field::DAMPER] & field::OPEN ? position : 0;
-}
-
-std::optional<Mode> Controller::ac_mode() const {
-  if (!session_.ready()) return {};
-  const auto &system = session_.bank().find(kind::SYSTEM)->data;
-  if (system[field::POWER] == 0) return Mode::OFF;
-  static constexpr Mode MODES[] = {Mode::OFF, Mode::COOL, Mode::HEAT, Mode::FAN, Mode::AUTO, Mode::DRY};
-  const uint8_t code = system[field::MODE];
-  if (code == 0 || code > 5) return {};
-  return MODES[code];
-}
-
-std::optional<Fan> Controller::ac_fan() const {
-  if (!session_.ready()) return {};
-  static constexpr Fan FANS[] = {Fan::AUTO, Fan::LOW, Fan::MEDIUM, Fan::HIGH, Fan::AUTO};
-  const uint8_t code = session_.bank().find(kind::SYSTEM)->data[field::FAN];
-  if (code == 0 || code > 4) return {};
-  return FANS[code];
-}
-
-// What the control box is doing for a zone: its damper opens past the floor while the zone is on the far side of its
-// setpoint.
-Action Controller::zone_action_(uint8_t zone) const {
-  if (!session_.ready() || session_.bank().find(kind::SYSTEM)->data[field::POWER] == 0) return Action::OFF;
-  switch (session_.bank().find(kind::SYSTEM)->data[field::MODE]) {
-    case 1:
-      return temperature(zone) > setpoint(zone) ? Action::COOLING : Action::IDLE;
-    case 2:
-      return temperature(zone) < setpoint(zone) ? Action::HEATING : Action::IDLE;
-    case 3:
-      return Action::FAN;
-    case 5:
-      return Action::DRYING;
-    default:
-      return Action::IDLE;
-  }
-}
-
-Action Controller::action(uint8_t zone) const { return on_(zone) && open_(zone) ? zone_action_(zone) : Action::OFF; }
-
-Action Controller::ac_action() const {
-  if (reference() != 0) return zone_action_(reference());
-  // On its own setpoint the AC's room temperature isn't on the bus, so only its mode shows.
-  if (!session_.ready() || session_.bank().find(kind::SYSTEM)->data[field::POWER] == 0) return Action::OFF;
-  static constexpr Action ACTIONS[] = {Action::IDLE, Action::COOLING, Action::HEATING,
-                                       Action::FAN,  Action::IDLE,    Action::DRYING};
-  const uint8_t mode = session_.bank().find(kind::SYSTEM)->data[field::MODE];
-  return mode <= 5 ? ACTIONS[mode] : Action::IDLE;
 }
 
 bool Controller::set_offset(uint8_t zone, float value) {
@@ -329,7 +272,7 @@ bool Controller::carrying_(uint8_t zone) const {
   return on_(zone) && std::isfinite(temperature(zone)) && carries_(zone);
 }
 
-bool Controller::candidate_(uint8_t zone) const { return carrying_(zone) && open_(zone); }
+bool Controller::candidate_(uint8_t zone) const { return carrying_(zone) && session_.zone_open(zone); }
 
 // The control box's damper loop is proportional: a room with more load than its share of air settles past its edge, its
 // damper part open. An open zone other than the reference whose room is past BEHIND gets a trim, its zone setpoint a
@@ -343,7 +286,8 @@ void Controller::trim_(uint32_t now, Side side, uint8_t reference) {
     trim_changed_.fill(now);
   }
   for (uint8_t zone = 1; zone <= zone_count_(); zone++) {
-    const float error = conditioning && zone != reference && on_(zone) && open_(zone) ? error_(zone, side) : NAN;
+    const float error =
+        conditioning && zone != reference && on_(zone) && session_.zone_open(zone) ? error_(zone, side) : NAN;
     if (std::isnan(error)) {
       trims_[zone] = 0;
       trim_changed_[zone] = now;
@@ -425,9 +369,9 @@ uint8_t Controller::choose_fan_(uint32_t now, Side side) const {
     const auto state = session_.desired(kind::ZONE, zone);
     if (state && (state->data[field::DAMPER] & field::OPEN))
       open += weight_(zone) * (state->data[field::DAMPER] & field::POSITION) / 100.0f;
-    if (on_(zone) && open_(zone) && sensor_zone_(zone))
+    if (on_(zone) && session_.zone_open(zone) && sensor_zone_(zone))
       asked += weight_(zone) * std::clamp(or_lowest(error_(zone, side)), 0.0f, FAN_REACH);
-    if (airflow_on_(zone) && open_(zone)) asked += weight_(zone) * airflows_[zone]->position / 100.0f;
+    if (airflow_on_(zone) && session_.zone_open(zone)) asked += weight_(zone) * airflows_[zone]->position / 100.0f;
   }
   uint8_t fan = 1;
   if ((mode_ == Mode::AUTO || mode_ == Mode::COOL || mode_ == Mode::HEAT) && capacity > 0) {

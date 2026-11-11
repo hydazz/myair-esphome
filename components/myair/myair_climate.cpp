@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "esphome/core/controller_registry.h"
+
 namespace esphome::myair {
 
 static const climate::ClimateAction ACTIONS[] = {
@@ -69,10 +71,21 @@ void SystemClimate::control(const climate::ClimateCall &call) {
 // control box doesn't report.
 void SystemClimate::refresh() {
   auto &controller = parent_->controller();
-  const auto reference = controller.reference();
+  const auto reference = parent_->session().equipment().value_or(EquipmentState{}).reference;
   const auto next_mode = MODES[static_cast<uint8_t>(controller.mode())];
   const auto next_fan = FANS[static_cast<uint8_t>(controller.fan())];
-  const auto next_action = ACTIONS[static_cast<uint8_t>(controller.ac_action())];
+  const auto activity = parent_->activity();
+  if (!activity) {
+    if (has_state()) {
+      set_has_state(false);
+      state_callback_.call(*this);
+#ifdef USE_CONTROLLER_REGISTRY
+      ControllerRegistry::notify_climate_update(this);
+#endif
+    }
+    return;
+  }
+  const auto next_action = ACTIONS[static_cast<uint8_t>(*activity)];
   const float current = controller.temperature(reference);
   const float target = controller.target();
   const bool ranges = parent_->has_temperature_zones();
@@ -81,8 +94,8 @@ void SystemClimate::refresh() {
   const float high = room ? room->cool_to : NAN;
   const bool same_targets = ranges ? same(target_temperature_low, low) && same(target_temperature_high, high)
                                    : same(target_temperature, target);
-  if (mode == next_mode && fan_mode == next_fan && action == next_action && same(current_temperature, current) &&
-      same_targets)
+  if (has_state() && mode == next_mode && fan_mode == next_fan && action == next_action &&
+      same(current_temperature, current) && same_targets)
     return;
   mode = next_mode;
   fan_mode = next_fan;
@@ -119,8 +132,19 @@ void ZoneClimate::refresh() {
   const auto room = controller.room(zone_->number).value_or(Room{});
   const auto current = controller.temperature(zone_->number);
   const auto next_mode = room.on ? climate::CLIMATE_MODE_HEAT_COOL : climate::CLIMATE_MODE_OFF;
-  const auto next_action = ACTIONS[static_cast<uint8_t>(controller.action(zone_->number))];
-  if (mode == next_mode && action == next_action && target_temperature_low == room.heat_to &&
+  const auto activity = Activity::zone(zone_->parent->activity(), room.on, controller.damper(zone_->number));
+  if (!activity) {
+    if (has_state()) {
+      set_has_state(false);
+      state_callback_.call(*this);
+#ifdef USE_CONTROLLER_REGISTRY
+      ControllerRegistry::notify_climate_update(this);
+#endif
+    }
+    return;
+  }
+  const auto next_action = ACTIONS[static_cast<uint8_t>(*activity)];
+  if (has_state() && mode == next_mode && action == next_action && target_temperature_low == room.heat_to &&
       target_temperature_high == room.cool_to && same(current_temperature, current))
     return;
   mode = next_mode;

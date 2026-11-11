@@ -4,6 +4,25 @@
 
 namespace esphome::myair {
 
+std::optional<EquipmentState> Session::equipment() const {
+  if (!ready_) return {};
+  const auto &data = bank_.find(kind::SYSTEM)->data;
+  if (data[field::POWER] > 1) return {};
+  EquipmentState state;
+  state.enabled = data[field::POWER] == 1;
+  state.reference = data[field::REFERENCE];
+  static constexpr Mode MODES[] = {Mode::OFF, Mode::COOL, Mode::HEAT, Mode::FAN, Mode::AUTO, Mode::DRY};
+  static constexpr Fan FANS[] = {Fan::AUTO, Fan::LOW, Fan::MEDIUM, Fan::HIGH, Fan::AUTO};
+  if (data[field::MODE] > 0 && data[field::MODE] <= 5) state.mode = MODES[data[field::MODE]];
+  if (data[field::FAN] > 0 && data[field::FAN] <= 4) state.fan = FANS[data[field::FAN]];
+  return state;
+}
+
+bool Session::zone_open(uint8_t zone) const {
+  const auto *state = bank_.find(kind::ZONE, zone);
+  return ready_ && state != nullptr && (state->data[field::DAMPER] & field::OPEN) != 0;
+}
+
 static uint8_t zone_key(const Record &record) {
   return record.kind == kind::ZONE || record.kind == kind::LIMITS ? record.data[field::ZONE_NUMBER] : 0;
 }
@@ -61,13 +80,12 @@ void Session::reset_(uint32_t now) {
       if (observed != nullptr) discarded_writes_ += " " + encode_record(encode_write(*observed, change));
     };
     for (const auto &change : active_) {
-      if (std::none_of(readback_.begin(), readback_.end(), [&](const Record &r) { return change.matches(r); }))
-        append(change, "unconfirmed");
+      const auto *observed = bank_.find(change.kind, change.zone);
+      if (observed == nullptr || !change.matches(*observed)) append(change, "unconfirmed");
     }
     for (const auto &change : writes_) append(change, "unsent");
   }
   active_.clear();
-  readback_.clear();
   writes_.clear();
   for (auto &sensor : sensors_) sensor.report.reset();
   sensor_index_ = 0;
@@ -243,22 +261,6 @@ void Session::handle_(const Frame &message, uint32_t now) {
       }
       continue;
     }
-    // A command can change the mode and several zone targets. Keep their readback together so consumers never
-    // combine one side's mode with the other side's targets, even when the echoes arrive in separate frames.
-    const bool readback =
-        from_control_box_(record) && std::any_of(active_.begin(), active_.end(), [&](const Change &change) {
-          return change.kind == record.kind && change.zone == zone_key(record);
-        });
-    if (readback) {
-      const auto previous = std::find_if(readback_.begin(), readback_.end(), [&](const Record &item) {
-        return item.kind == record.kind && zone_key(item) == zone_key(record);
-      });
-      if (previous == readback_.end())
-        readback_.push_back(record);
-      else
-        *previous = record;
-      continue;
-    }
     changed |= bank_.apply(record);
     // Bit 6 of a sensor record's info byte is its pair button.
     if (pairing_zone_ != 0 && record.kind == kind::SENSOR && from_control_box_(record) &&
@@ -298,12 +300,10 @@ void Session::handle_(const Frame &message, uint32_t now) {
     }
   }
   if (!active_.empty() && std::all_of(active_.begin(), active_.end(), [&](const Change &change) {
-        return std::any_of(readback_.begin(), readback_.end(),
-                           [&](const Record &record) { return change.matches(record); });
+        const auto *observed = bank_.find(change.kind, change.zone);
+        return observed != nullptr && change.matches(*observed);
       })) {
-    for (const auto &record : readback_) bank_.apply(record);
     active_.clear();
-    readback_.clear();
     changed = true;
   }
   if (!had_control_box && bank_.has_control_box()) {

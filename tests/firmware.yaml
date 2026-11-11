@@ -30,7 +30,17 @@ uart:
   baud_rate: 57600
   rx_buffer_size: 2048
 
+sensor:
+  - platform: template
+    id: ac_power
+    internal: true
+    lambda: return 15.0f;
+    update_interval: 10s
+
 myair:
+  power_feedback:
+    sensor: ac_power
+    idle_below: 50 W
   uart_id: cb_uart
   zones:
     - zone: 1

@@ -6,25 +6,9 @@
 
 namespace esphome::myair {
 
-enum class Mode : uint8_t { OFF, AUTO, COOL, HEAT, FAN, DRY };
 // The range of every setpoint the ESP sends (°C).
 static constexpr float MIN_SETPOINT = 16;
 static constexpr float MAX_SETPOINT = 32;
-enum class Fan : uint8_t { AUTO, LOW, MEDIUM, HIGH };
-enum class Action : uint8_t { OFF, IDLE, COOLING, HEATING, FAN, DRYING };
-
-// A temperature zone's room: off, or conditioned toward its range.
-struct Room {
-  bool on{};
-  float heat_to{20};
-  float cool_to{24};
-};
-
-// A zone without a sensor: off, or open at a damper position in 5 % steps.
-struct Airflow {
-  bool on{};
-  uint8_t position{100};
-};
 
 // Holds in milliseconds. A simulator running house time faster shortens them.
 struct Tuning {
@@ -63,20 +47,11 @@ class Controller {
   // scales it. Every zone is 1 until set.
   bool set_airflow_weight(uint8_t zone, float weight);
   float airflow_weight(uint8_t zone) const { return zone <= 10 ? airflow_weights_[zone] : 1; }
-  // A room's action; OFF while the room is off.
-  Action action(uint8_t zone) const;
-  // The AC's action, judged on the reference zone.
-  Action ac_action() const;
-  uint8_t reference() const;
   float temperature(uint8_t zone) const;
   // The zone's setpoint in the control box, in the room's calibrated units.
   float setpoint(uint8_t zone) const;
   // The position the control box's loop sets for an open zone, in percent; 0 for a closed zone and NaN while unknown.
   float damper(uint8_t zone) const;
-  // What the control box runs the AC at: OFF while it is stopped and AUTO for the AC's own auto. Empty before the
-  // control box reports, or for a code it doesn't use.
-  std::optional<Mode> ac_mode() const;
-  std::optional<Fan> ac_fan() const;
   bool set_offset(uint8_t zone, float offset);
   float offset(uint8_t zone) const { return zone <= 10 ? offsets_[zone] : 0; }
   bool set_damper_limit(uint8_t zone, bool maximum, float value);
@@ -86,14 +61,12 @@ class Controller {
   enum class Side : uint8_t { COOL, HEAT };
   uint8_t zone_count_() const;
   bool sensor_zone_(uint8_t zone) const;
-  bool open_(uint8_t zone) const;
   bool on_(uint8_t zone) const { return zone <= 10 && rooms_[zone] && rooms_[zone]->on; }
   bool airflow_on_(uint8_t zone) const { return zone <= 10 && airflows_[zone] && airflows_[zone]->on; }
   bool constant_(uint8_t zone) const;
   uint16_t shortfall_() const;
   float error_(uint8_t zone, Side side) const;
   float weight_(uint8_t zone) const;
-  Action zone_action_(uint8_t zone) const;
   bool carries_(uint8_t zone) const;
   // An on room with a readable temperature that carries the AC: it can run the AC and choose Auto's side, and once open
   // it is a candidate for the reference.

@@ -4,8 +4,10 @@ enable_testing()
 add_executable(myair_tests
   test_myair.cpp
   test_controls.cpp
+  test_activity.cpp
   ../components/myair/protocol.cpp
   ../components/myair/controller.cpp
+  ../components/myair/activity.cpp
   ../components/myair/session.cpp
 )
 target_compile_features(myair_tests PRIVATE cxx_std_17)
