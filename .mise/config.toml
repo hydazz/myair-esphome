@@ -17,11 +17,9 @@ lockfile = true
 UV_PYTHON = "python"
 
 [tasks.deps]
-description = "Install locked Python dependencies"
 run = "uv sync --locked"
 
 [tasks.format]
-description = "Format sources and configuration"
 run = [
   "mise fmt",
   "oxfmt .",
@@ -31,7 +29,6 @@ run = [
 ]
 
 [tasks.fmt-check]
-description = "Check formatting"
 run = [
   "mise fmt --check",
   "oxfmt --check .",
@@ -40,7 +37,6 @@ run = [
 ]
 
 [tasks.lint]
-description = "Lint the component, workflows and example configuration"
 run = [
   "ruff check components tests",
   "jactionlint --shellcheck=",
@@ -48,7 +44,6 @@ run = [
 ]
 
 [tasks.test]
-description = "Run configuration, protocol and control tests"
 run = [
   "cmake -S tests -B .build -DCMAKE_BUILD_TYPE=Debug",
   "cmake --build .build",
@@ -57,7 +52,6 @@ run = [
 ]
 
 [tasks.build]
-description = "Compile the test firmware"
 run = "uv run --locked esphome compile tests/firmware.yaml"
 
 [hooks]
